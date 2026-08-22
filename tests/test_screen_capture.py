@@ -8,6 +8,8 @@ from unittest.mock import patch
 from desktop_utils import fit_preview_size, friendly_error_message, shanten_label
 from ocr_input import OCRResult, TileRecognition
 from screen_capture import (
+    _DXGI_CAMERAS,
+    _capture_with_dxgi,
     ScreenCaptureError,
     _dxgi_output_for_monitor,
     analysis_payload,
@@ -109,6 +111,41 @@ class ScreenCaptureTests(unittest.TestCase):
 
         self.assertIs(captured, frame)
         self.assertEqual(region["backend"], "MSS")
+
+    def test_dxgi_camera_is_reused_between_frames(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"NumPy is not installed: {exc}")
+
+        class FakeCamera:
+            def grab(self, **_: object):
+                return np.full((20, 40, 3), 80, dtype=np.uint8)
+
+            def release(self) -> None:
+                pass
+
+        class FakeDxcam:
+            create_count = 0
+
+            @classmethod
+            def create(cls, **_: object):
+                cls.create_count += 1
+                return FakeCamera()
+
+        monitor = {"left": 0, "top": 0, "width": 100, "height": 100}
+        region = {"left": 0, "top": 0, "width": 40, "height": 20}
+        _DXGI_CAMERAS.clear()
+        with (
+            patch("screen_capture._is_windows", return_value=True),
+            patch("screen_capture._dxcam_module", return_value=FakeDxcam),
+            patch("screen_capture._dxgi_output_for_monitor", return_value=(0, 0)),
+        ):
+            _capture_with_dxgi(1, monitor, region, np)
+            _capture_with_dxgi(1, monitor, region, np)
+
+        self.assertEqual(FakeDxcam.create_count, 1)
+        _DXGI_CAMERAS.clear()
 
     def test_capture_reuses_geometry_without_enumerating_monitor_again(self) -> None:
         try:

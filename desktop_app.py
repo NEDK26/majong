@@ -22,8 +22,14 @@ from desktop_utils import friendly_error_message, shanten_label
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     build_mahjong_soul_templates,
+    import_labeled_template_folder,
 )
-from screen_capture import analyze_capture, capture_screen, list_monitors
+from screen_capture import (
+    analyze_capture,
+    capture_screen,
+    list_monitors,
+    release_capture_resources,
+)
 from tile_utils import tile_name_to_chinese
 
 
@@ -44,7 +50,7 @@ BACKEND_LABELS = {
     "MSS（普通窗口）": "mss",
 }
 COUNT_VALUES = ["自动", "14", "13", "11", "10", "8", "7", "5", "4", "2", "1"]
-INTERVAL_VALUES = ["1 秒", "1.5 秒", "2.5 秒"]
+INTERVAL_VALUES = ["0.5 秒", "1 秒", "1.5 秒"]
 
 
 class CompactOverlayApp:
@@ -58,7 +64,7 @@ class CompactOverlayApp:
         self.region: dict[str, int] | None = None
         self.backend = "auto"
         self.expected_count: int | None = None
-        self.interval_ms = 1500
+        self.interval_ms = 500
         self.running = False
         self.analysis_inflight = False
         self.timer_id: str | None = None
@@ -77,7 +83,7 @@ class CompactOverlayApp:
         self.monitor_var = tk.StringVar()
         self.backend_var = tk.StringVar(value="自动（DXGI 优先）")
         self.count_var = tk.StringVar(value="自动")
-        self.interval_var = tk.StringVar(value="1.5 秒")
+        self.interval_var = tk.StringVar(value="0.5 秒")
 
         self._load_preferences()
         self._build_bar()
@@ -290,11 +296,15 @@ class CompactOverlayApp:
             self.count_var.set(
                 "自动" if self.expected_count is None else str(self.expected_count)
             )
-            self.interval_ms = int(data.get("interval_ms", 1500))
-            self.interval_ms = min(2500, max(1000, self.interval_ms))
+            settings_version = int(data.get("settings_version", 1))
+            self.interval_ms = int(data.get("interval_ms", 500))
+            # 旧版默认 1.5 秒，容易错过摸牌后的短暂 14 张状态。
+            if settings_version < 2:
+                self.interval_ms = 500
+            self.interval_ms = min(1500, max(500, self.interval_ms))
             self.interval_var.set(
-                {1000: "1 秒", 1500: "1.5 秒", 2500: "2.5 秒"}.get(
-                    self.interval_ms, "1.5 秒"
+                {500: "0.5 秒", 1000: "1 秒", 1500: "1.5 秒"}.get(
+                    self.interval_ms, "0.5 秒"
                 )
             )
             region = data.get("region")
@@ -309,6 +319,7 @@ class CompactOverlayApp:
     def _save_preferences(self) -> None:
         path = self._preferences_path()
         data = {
+            "settings_version": 2,
             "monitor_id": self.monitor_id,
             "backend": self.backend,
             "expected_count": self.expected_count,
@@ -386,7 +397,10 @@ class CompactOverlayApp:
         capture = data.get("captureRegion", {})
         backend = capture.get("backend", "屏幕")
         confidence = float(data.get("minimumConfidence", 0.0))
-        self.status_var.set(f"{backend} · {confidence * 100:.0f}%")
+        recognized_count = len(data.get("tiles", []))
+        self.status_var.set(
+            f"{backend} · {recognized_count}张 · {confidence * 100:.0f}%"
+        )
 
         recommendations = list(data.get("recommendations", []))
         candidates = list(data.get("candidates", []))
@@ -405,11 +419,11 @@ class CompactOverlayApp:
         elif data.get("mode") == "draw":
             effective = list(data.get("effectiveDraws", []))
             self.main_var.set(
-                f"当前 {shanten_label(int(data['shanten']))}　·　"
-                f"有效牌共 {data.get('drawUkeire', 0)} 张"
+                f"识别到 {recognized_count} 张，等待摸牌　·　"
+                f"当前 {shanten_label(int(data['shanten']))}"
             )
             self.meta_var.set(
-                "有效牌："
+                "摸到后有效牌："
                 + "、".join(
                     f"{tile_name_to_chinese(item['tile'])}×{item['remaining']}"
                     for item in effective
@@ -450,7 +464,7 @@ class CompactOverlayApp:
         window.resizable(False, False)
         window.attributes("-topmost", True)
         window.protocol("WM_DELETE_WINDOW", self.toggle_settings)
-        width, height = 360, 330
+        width, height = 360, 372
         left = max(8, self.root.winfo_x() + self.root.winfo_width() - width)
         top = self.root.winfo_y() + self.root.winfo_height() + 6
         window.geometry(f"{width}x{height}+{left}+{top}")
@@ -514,6 +528,13 @@ class CompactOverlayApp:
         self._settings_button(
             actions, "校准雀魂牌面", self.calibrate_templates, secondary=True
         ).pack(side="right")
+
+        self._settings_button(
+            body,
+            "导入逐张实战样本（提高准确率）",
+            self.import_labeled_samples,
+            secondary=True,
+        ).pack(fill="x", pady=(10, 0))
 
         tk.Label(
             body,
@@ -589,8 +610,8 @@ class CompactOverlayApp:
         self.backend = BACKEND_LABELS.get(self.backend_var.get(), "auto")
         count = self.count_var.get()
         self.expected_count = None if count == "自动" else int(count)
-        self.interval_ms = {"1 秒": 1000, "1.5 秒": 1500, "2.5 秒": 2500}.get(
-            self.interval_var.get(), 1500
+        self.interval_ms = {"0.5 秒": 500, "1 秒": 1000, "1.5 秒": 1500}.get(
+            self.interval_var.get(), 500
         )
         self._save_preferences()
         if self.running:
@@ -616,6 +637,30 @@ class CompactOverlayApp:
         self.status_var.set("校准完成")
         self.main_var.set("牌面模板已保存，可以开始读取游戏画面")
         self.meta_var.set("下一步点击“框选”，只圈住自己的暗牌")
+        self.start()
+
+    def import_labeled_samples(self) -> None:
+        path = filedialog.askdirectory(
+            parent=self.settings_window or self.root,
+            title="选择逐张牌样本文件夹（例如：八筒.png、北.png）",
+        )
+        if not path:
+            return
+        self.status_var.set("正在导入")
+        self.main_var.set("正在导入逐张实战牌面样本…")
+        self._run_worker(
+            lambda: import_labeled_template_folder(path),
+            self._sample_import_done,
+            self._show_error,
+        )
+
+    def _sample_import_done(self, result: tuple[Path, int, int]) -> None:
+        _, sample_count, tile_count = result
+        self.status_var.set("样本已导入")
+        self.main_var.set(
+            f"已导入 {sample_count} 张样本，覆盖 {tile_count} 种牌"
+        )
+        self.meta_var.set("样本只保存在本机，不会上传；正在重新识别")
         self.start()
 
     def select_region(self) -> None:
@@ -776,7 +821,8 @@ class CompactOverlayApp:
             self.settings_window.destroy()
         if self.selector_window is not None:
             self.selector_window.destroy()
-        self.worker.shutdown(wait=False, cancel_futures=True)
+        self.worker.submit(release_capture_resources)
+        self.worker.shutdown(wait=False, cancel_futures=False)
         self.root.destroy()
 
 

@@ -29,6 +29,7 @@ class ScreenCaptureError(RuntimeError):
 
 
 CAPTURE_BACKENDS = ("auto", "dxgi", "mss")
+_DXGI_CAMERAS: dict[tuple[int, int], Any] = {}
 
 
 def _screen_modules() -> tuple[Any, Any, Any]:
@@ -131,21 +132,31 @@ def _capture_with_dxgi(
         left + capture_region["width"],
         top + capture_region["height"],
     )
+    camera_key = (device_idx, output_idx)
     try:
-        with dxcam.create(
-            device_idx=device_idx,
-            output_idx=output_idx,
-            output_color="BGR",
-            backend="dxgi",
-            processor_backend="cv2",
-        ) as camera:
-            frame = None
-            for _ in range(4):
-                frame = camera.grab(region=region, new_frame_only=False)
-                if frame is not None:
-                    break
-                time.sleep(0.03)
+        camera = _DXGI_CAMERAS.get(camera_key)
+        if camera is None:
+            camera = dxcam.create(
+                device_idx=device_idx,
+                output_idx=output_idx,
+                output_color="BGR",
+                backend="dxgi",
+                processor_backend="cv2",
+            )
+            _DXGI_CAMERAS[camera_key] = camera
+        frame = None
+        for _ in range(3):
+            frame = camera.grab(region=region, new_frame_only=False)
+            if frame is not None:
+                break
+            time.sleep(0.01)
     except Exception as exc:
+        camera = _DXGI_CAMERAS.pop(camera_key, None)
+        if camera is not None:
+            try:
+                camera.release()
+            except Exception:
+                pass
         raise ScreenCaptureError(
             "DXGI 捕获失败。请把游戏和牌理镜设为相同权限级别，并更新显卡驱动。"
         ) from exc
@@ -158,6 +169,16 @@ def _capture_with_dxgi(
     if frame.ndim != 3 or frame.shape[2] < 3:
         raise ScreenCaptureError("DXGI 返回了无法识别的图像格式。")
     return np.ascontiguousarray(frame[:, :, :3])
+
+
+def release_capture_resources() -> None:
+    """释放复用的 DXGI 捕获器；应尽量在创建它的工作线程中调用。"""
+    for camera in list(_DXGI_CAMERAS.values()):
+        try:
+            camera.release()
+        except Exception:
+            pass
+    _DXGI_CAMERAS.clear()
 
 
 def _capture_with_mss(

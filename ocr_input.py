@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tile_utils import HandValidationError
+from tile_utils import HandValidationError, TILE_NAMES, tile_name_to_chinese
 
 
 DEFAULT_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "ocr_templates"
@@ -93,6 +93,13 @@ _TEMPLATE_FILES: dict[str, str] = {
     "Sou5-Dora.png": "5s",
 }
 _TEMPLATE_CACHE: dict[str, list[tuple[str, Any, Any, float]]] = {}
+_CANONICAL_STEM_BY_TILE = {
+    tile: Path(filename).stem
+    for filename, tile in _TEMPLATE_FILES.items()
+    if "-Dora" not in filename
+}
+_TILE_BY_CHINESE_NAME = {tile_name_to_chinese(tile): tile for tile in TILE_NAMES}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def _cv_modules() -> tuple[Any, Any]:
@@ -206,16 +213,82 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
             if "-Dora" not in filename:
                 missing.append(filename)
             continue
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if image is None:
-            raise OCRError(f"无法读取 OCR 模板：{path}")
-        glyph, colors, ratio = _ink_descriptor(image, cv2, np)
-        descriptors.append((tile, glyph, colors, ratio))
+        sample_paths = [path]
+        sample_paths.extend(
+            candidate
+            for candidate in sorted(template_dir.glob(f"{path.stem}_样本*"))
+            if candidate.suffix.lower() in _IMAGE_EXTENSIONS
+        )
+        for sample_path in sample_paths:
+            image = cv2.imread(str(sample_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                raise OCRError(f"无法读取 OCR 模板：{sample_path}")
+            glyph, colors, ratio = _ink_descriptor(image, cv2, np)
+            descriptors.append((tile, glyph, colors, ratio))
 
     if missing:
         raise OCRError("OCR 模板缺失：" + "、".join(missing))
     _TEMPLATE_CACHE[cache_key] = descriptors
     return descriptors
+
+
+def _tile_from_sample_filename(path: Path) -> str | None:
+    """支持“八筒.png / 八筒_2.png”和内部标准文件名。"""
+    stem = path.stem
+    for chinese_name, tile in _TILE_BY_CHINESE_NAME.items():
+        if stem == chinese_name or stem.startswith(f"{chinese_name}_"):
+            return tile
+    normalized = stem.split("_", 1)[0]
+    for filename, tile in _TEMPLATE_FILES.items():
+        if normalized.lower() == Path(filename).stem.lower():
+            return tile
+    return None
+
+
+def import_labeled_template_folder(
+    source_dir: str | Path,
+    output_dir: str | Path = DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
+) -> tuple[Path, int, int]:
+    """导入用户按中文牌名标注的实际游戏单牌样本。"""
+    cv2, _ = _cv_modules()
+    source = Path(source_dir).expanduser().resolve()
+    if not source.is_dir():
+        raise OCRError(f"逐张样本文件夹不存在：{source}")
+    destination = Path(output_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    imported = 0
+    covered_tiles: set[str] = set()
+    counters: dict[str, int] = {}
+    for sample_path in sorted(source.rglob("*")):
+        if not sample_path.is_file() or sample_path.suffix.lower() not in _IMAGE_EXTENSIONS:
+            continue
+        tile = _tile_from_sample_filename(sample_path)
+        if tile is None:
+            continue
+        image = cv2.imread(str(sample_path), cv2.IMREAD_UNCHANGED)
+        if image is None or getattr(image, "size", 0) == 0:
+            continue
+        stem = _CANONICAL_STEM_BY_TILE[tile]
+        counters[stem] = counters.get(stem, 0) + 1
+        sample_number = counters[stem]
+        target = destination / f"{stem}_样本{sample_number:03d}.png"
+        while target.exists():
+            sample_number += 1
+            target = destination / f"{stem}_样本{sample_number:03d}.png"
+        counters[stem] = sample_number
+        if not cv2.imwrite(str(target), image):
+            raise OCRError(f"无法保存逐张样本：{target}")
+        imported += 1
+        covered_tiles.add(tile)
+
+    if imported == 0:
+        raise OCRError(
+            "没有找到已标注样本。请使用“八筒.png、六索_2.png、北.png”"
+            "这样的中文文件名。"
+        )
+    _TEMPLATE_CACHE.pop(str(destination), None)
+    return destination, imported, len(covered_tiles)
 
 
 def _iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
@@ -518,6 +591,40 @@ def _uniform_layout(
     return boxes, 0.45
 
 
+def _shortlist_layouts(
+    image: Any,
+    layouts: list[tuple[list[tuple[int, int, int, int]], float]],
+) -> list[tuple[list[tuple[int, int, int, int]], float]]:
+    """每种合法张数只保留几何最可信的一行，避免重复做昂贵模板匹配。"""
+    candidates_by_count: dict[
+        int, list[tuple[float, list[tuple[int, int, int, int]], float]]
+    ] = {}
+    seen: set[tuple[tuple[int, int, int, int], ...]] = set()
+    for boxes, regularity in layouts:
+        signature = tuple(boxes)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        bottomness = sum(y + height / 2 for _, y, _, height in boxes) / (
+            len(boxes) * image.shape[0]
+        )
+        count_preference = min(1.0, len(boxes) / 14.0)
+        geometry_score = (
+            regularity * 0.55 + bottomness * 0.30 + count_preference * 0.15
+        )
+        candidates_by_count.setdefault(len(boxes), []).append(
+            (geometry_score, boxes, regularity)
+        )
+
+    finalists = [
+        candidate
+        for candidates in candidates_by_count.values()
+        for candidate in sorted(candidates, key=lambda item: item[0], reverse=True)[:2]
+    ]
+    finalists.sort(key=lambda item: item[0], reverse=True)
+    return [(boxes, regularity) for _, boxes, regularity in finalists[:8]]
+
+
 def _similarity(
     query_glyph: Any,
     query_colors: Any,
@@ -610,6 +717,8 @@ def _recognize_hand_array(
             "未检测到合法张数的一行直立牌。请先把图片裁到只包含自己的横向暗牌，"
             "并使用 --ocr-count 明确暗牌张数。"
         )
+
+    layouts = _shortlist_layouts(image, layouts)
 
     best_result: tuple[float, list[TileRecognition]] | None = None
     for boxes, regularity in layouts:

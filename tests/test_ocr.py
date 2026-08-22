@@ -11,6 +11,7 @@ from ocr_input import (
     DEFAULT_TEMPLATE_DIR,
     _mahjong_soul_template_dir,
     build_mahjong_soul_templates,
+    import_labeled_template_folder,
     recognize_hand_image,
 )
 
@@ -128,6 +129,29 @@ class OCRTests(unittest.TestCase):
             self.assertIn("Man1.png", generated)
             self.assertIn("Chun.png", generated)
             self.assertIn("Sou9.png", generated)
+
+    def test_imports_chinese_named_single_tile_samples(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "samples"
+            output = Path(directory) / "templates"
+            source.mkdir()
+            sample = self._load_tile(cv2, np, "Pin8.png", 60, 88)
+            self.assertTrue(cv2.imwrite(str(source / "八筒.png"), sample))
+            self.assertTrue(cv2.imwrite(str(source / "八筒_2.png"), sample))
+
+            result_dir, sample_count, tile_count = import_labeled_template_folder(
+                source, output
+            )
+
+            self.assertEqual(sample_count, 2)
+            self.assertEqual(tile_count, 1)
+            self.assertEqual(len(list(result_dir.glob("Pin8_样本*.png"))), 2)
 
     def test_auto_detects_eight_concealed_tiles_below_smaller_open_melds(self) -> None:
         try:
