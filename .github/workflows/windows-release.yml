@@ -61,10 +61,8 @@ jobs:
 
       - name: Smoke test packaged EXE
         timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $process = Start-Process -FilePath dist\MahjongStudyAnalyzer.exe -ArgumentList "--smoke-test" -Wait -PassThru
-          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+        shell: cmd
+        run: dist\MahjongStudyAnalyzer.exe --smoke-test
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')

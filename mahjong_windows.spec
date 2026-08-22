@@ -42,7 +42,8 @@ executable = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    # 临时开启控制台，供 Windows CI 暴露精简配置中缺失模块的真实错误。
+    console=True,
     # 自动化自检遇到启动错误时直接返回非零，不弹出会挂住构建的异常对话框。
     disable_windowed_traceback=True,
     argv_emulation=False,
