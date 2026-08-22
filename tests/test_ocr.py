@@ -142,8 +142,10 @@ class OCRTests(unittest.TestCase):
             output = Path(directory) / "templates"
             source.mkdir()
             sample = self._load_tile(cv2, np, "Pin8.png", 60, 88)
-            self.assertTrue(cv2.imwrite(str(source / "八筒.png"), sample))
-            self.assertTrue(cv2.imwrite(str(source / "八筒_2.png"), sample))
+            success, encoded = cv2.imencode(".png", sample)
+            self.assertTrue(success)
+            (source / "八筒.png").write_bytes(encoded.tobytes())
+            (source / "八筒_2.png").write_bytes(encoded.tobytes())
 
             result_dir, sample_count, tile_count = import_labeled_template_folder(
                 source, output
