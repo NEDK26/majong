@@ -367,9 +367,14 @@ class CompactOverlayApp:
         region = dict(self.region or {})
         expected_count = self.expected_count
         backend = self.backend
+        monitor_geometry = dict(self._current_monitor())
         self._run_worker(
             lambda: analyze_capture(
-                monitor_id, region, expected_count, backend=backend
+                monitor_id,
+                region,
+                expected_count,
+                backend=backend,
+                monitor_geometry=monitor_geometry,
             ),
             self._analysis_loaded,
             self._analysis_failed,
@@ -618,8 +623,13 @@ class CompactOverlayApp:
         self.root.after(300, lambda: self._capture_for_selector(was_running))
 
     def _capture_for_selector(self, resume_after: bool) -> None:
+        monitor_geometry = dict(self._current_monitor())
         self._run_worker(
-            lambda: capture_screen(self.monitor_id, backend=self.backend)[0],
+            lambda: capture_screen(
+                self.monitor_id,
+                backend=self.backend,
+                monitor_geometry=monitor_geometry,
+            )[0],
             lambda frame: self._open_selector(frame, resume_after),
             lambda exc: self._selector_failed(exc, resume_after),
         )

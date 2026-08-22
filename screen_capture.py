@@ -223,6 +223,7 @@ def capture_screen(
     monitor_id: int,
     region: dict[str, Any] | None = None,
     backend: str = "auto",
+    monitor_geometry: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """返回 BGR 屏幕帧和实际捕获区域。
 
@@ -232,7 +233,16 @@ def capture_screen(
     if backend not in CAPTURE_BACKENDS:
         raise ScreenCaptureError(f"未知捕获方式：{backend}")
     cv2, mss, np = _screen_modules()
-    monitor = _selected_monitor(mss, monitor_id)
+    if monitor_geometry is None:
+        monitor = _selected_monitor(mss, monitor_id)
+    else:
+        try:
+            monitor = {
+                key: int(monitor_geometry[key])
+                for key in ("left", "top", "width", "height")
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ScreenCaptureError("已保存的显示器坐标无效，请重新选择显示器。") from exc
     capture_region: dict[str, Any] = clamp_region(region, monitor)
     errors: list[str] = []
 
@@ -314,9 +324,15 @@ def analyze_capture(
     region: dict[str, Any] | None,
     expected_count: int | None,
     backend: str = "auto",
+    monitor_geometry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """捕获一次框选区域并返回 OCR + 牌理分析结果。"""
-    frame, capture_region = capture_screen(monitor_id, region, backend)
+    frame, capture_region = capture_screen(
+        monitor_id,
+        region,
+        backend,
+        monitor_geometry=monitor_geometry,
+    )
     template_dir = (
         DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR
         if DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR.is_dir()

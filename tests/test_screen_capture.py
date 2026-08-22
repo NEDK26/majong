@@ -110,6 +110,29 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertIs(captured, frame)
         self.assertEqual(region["backend"], "MSS")
 
+    def test_capture_reuses_geometry_without_enumerating_monitor_again(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"NumPy is not installed: {exc}")
+
+        frame = np.full((40, 80, 3), 100, dtype=np.uint8)
+        geometry = {"left": -80, "top": 0, "width": 80, "height": 40}
+        with (
+            patch("screen_capture._screen_modules", return_value=(object(), object(), np)),
+            patch("screen_capture._selected_monitor") as enumerate_monitor,
+            patch("screen_capture._capture_with_mss", return_value=frame),
+        ):
+            captured, region = capture_screen(
+                2,
+                backend="mss",
+                monitor_geometry=geometry,
+            )
+
+        enumerate_monitor.assert_not_called()
+        self.assertIs(captured, frame)
+        self.assertEqual(region["left"], -80)
+
     def test_desktop_preview_preserves_aspect_ratio(self) -> None:
         self.assertEqual(fit_preview_size(1920, 1080, 800, 600), (800, 450))
         self.assertEqual(fit_preview_size(640, 480, 1200, 900), (640, 480))
