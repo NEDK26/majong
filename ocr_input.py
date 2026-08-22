@@ -114,6 +114,28 @@ def _cv_modules() -> tuple[Any, Any]:
     return cv2, np
 
 
+def _read_image(path: Path, flags: int, cv2: Any, np: Any) -> Any:
+    """通过字节读取图片，绕过 Windows OpenCV 对中文路径的限制。"""
+    try:
+        data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, flags)
+
+
+def _write_image(path: Path, image: Any, cv2: Any) -> bool:
+    """通过 pathlib 写入编码结果，可靠支持 Windows 中文路径。"""
+    extension = path.suffix.lower() or ".png"
+    success, encoded = cv2.imencode(extension, image)
+    if not success:
+        return False
+    try:
+        path.write_bytes(encoded.tobytes())
+    except OSError:
+        return False
+    return True
+
+
 def _composite_alpha(image: Any, cv2: Any, np: Any) -> Any:
     if image.ndim != 3:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -220,7 +242,7 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
             if candidate.suffix.lower() in _IMAGE_EXTENSIONS
         )
         for sample_path in sample_paths:
-            image = cv2.imread(str(sample_path), cv2.IMREAD_UNCHANGED)
+            image = _read_image(sample_path, cv2.IMREAD_UNCHANGED, cv2, np)
             if image is None:
                 raise OCRError(f"无法读取 OCR 模板：{sample_path}")
             glyph, colors, ratio = _ink_descriptor(image, cv2, np)
@@ -250,7 +272,7 @@ def import_labeled_template_folder(
     output_dir: str | Path = DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
 ) -> tuple[Path, int, int]:
     """导入用户按中文牌名标注的实际游戏单牌样本。"""
-    cv2, _ = _cv_modules()
+    cv2, np = _cv_modules()
     source = Path(source_dir).expanduser().resolve()
     if not source.is_dir():
         raise OCRError(f"逐张样本文件夹不存在：{source}")
@@ -266,7 +288,7 @@ def import_labeled_template_folder(
         tile = _tile_from_sample_filename(sample_path)
         if tile is None:
             continue
-        image = cv2.imread(str(sample_path), cv2.IMREAD_UNCHANGED)
+        image = _read_image(sample_path, cv2.IMREAD_UNCHANGED, cv2, np)
         if image is None or getattr(image, "size", 0) == 0:
             continue
         stem = _CANONICAL_STEM_BY_TILE[tile]
@@ -277,7 +299,7 @@ def import_labeled_template_folder(
             sample_number += 1
             target = destination / f"{stem}_样本{sample_number:03d}.png"
         counters[stem] = sample_number
-        if not cv2.imwrite(str(target), image):
+        if not _write_image(target, image, cv2):
             raise OCRError(f"无法保存逐张样本：{target}")
         imported += 1
         covered_tiles.add(tile)
@@ -425,7 +447,7 @@ def build_mahjong_soul_templates(
     source = Path(reference_image).expanduser().resolve()
     if not source.is_file():
         raise OCRError(f"OCR 参考图不存在：{source}")
-    image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
+    image = _read_image(source, cv2.IMREAD_UNCHANGED, cv2, np)
     if image is None:
         raise OCRError(f"无法读取 OCR 参考图：{source}")
     image = _composite_alpha(image, cv2, np)
@@ -442,7 +464,7 @@ def build_mahjong_soul_templates(
         for box, filename in zip(row, names, strict=True):
             x, y, width, height = box
             crop = image[y : y + height, x : x + width]
-            if not cv2.imwrite(str(destination / filename), crop):
+            if not _write_image(destination / filename, crop, cv2):
                 raise OCRError(f"无法写入 OCR 模板：{destination / filename}")
     _TEMPLATE_CACHE.pop(str(destination), None)
     return destination
@@ -773,11 +795,11 @@ def recognize_hand_image(
     图片最好只保留底部手牌区域。若自动分割不稳定，可通过 ``expected_count``
     明确指定暗牌张数，并把图片裁成紧密的一行。
     """
-    cv2, _ = _cv_modules()
+    cv2, np = _cv_modules()
     path = Path(image_path).expanduser().resolve()
     if not path.is_file():
         raise OCRError(f"OCR 图片不存在：{path}")
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    image = _read_image(path, cv2.IMREAD_UNCHANGED, cv2, np)
     if image is None:
         raise OCRError(f"无法读取 OCR 图片：{path}")
     return _recognize_hand_array(
@@ -792,8 +814,8 @@ def save_debug_image(result: OCRResult, output_path: str | Path) -> Path:
     """保存带检测框、牌名和置信度的调试图。"""
     if result.image_path is None:
         raise OCRError("实时帧没有源文件路径，无法使用 save_debug_image。")
-    cv2, _ = _cv_modules()
-    image = cv2.imread(str(result.image_path), cv2.IMREAD_COLOR)
+    cv2, np = _cv_modules()
+    image = _read_image(result.image_path, cv2.IMREAD_COLOR, cv2, np)
     if image is None:
         raise OCRError(f"无法重新读取 OCR 图片：{result.image_path}")
 
@@ -814,6 +836,6 @@ def save_debug_image(result: OCRResult, output_path: str | Path) -> Path:
 
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image):
+    if not _write_image(path, image, cv2):
         raise OCRError(f"无法写入 OCR 调试图：{path}")
     return path
