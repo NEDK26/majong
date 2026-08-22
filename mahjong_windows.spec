@@ -29,18 +29,10 @@ analysis = Analysis(
 
 python_archive = PYZ(analysis.pure)
 
-# OpenCV 官方 wheel 仍附带约 30 MB 的视频编解码器；本程序只处理静态屏幕帧，
-# 不打开或写入视频。Windows 构建会在打包后实际导入 cv2 并运行颜色转换自检。
-runtime_binaries = [
-    item
-    for item in analysis.binaries
-    if "opencv_videoio_ffmpeg" not in item[0].lower()
-]
-
 executable = EXE(
     python_archive,
     analysis.scripts,
-    runtime_binaries,
+    analysis.binaries,
     analysis.datas,
     [],
     name="MahjongStudyAnalyzer",
