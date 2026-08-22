@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,9 +18,28 @@ from tile_utils import HandValidationError
 
 
 DEFAULT_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "ocr_templates"
-DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR = (
-    Path(__file__).resolve().parent / "local_ocr_templates" / "mahjong_soul"
-)
+
+
+def _mahjong_soul_template_dir() -> Path:
+    """返回可持久化的雀魂模板目录。
+
+    PyInstaller 单文件程序每次会解压到临时目录，不能把校准结果写在
+    ``__file__`` 旁边。源码运行仍保留项目内目录，便于开发和调试。
+    """
+    override = os.environ.get("MAHJONG_STUDY_DATA_DIR")
+    if override:
+        return Path(override).expanduser().resolve() / "mahjong_soul"
+    if getattr(sys, "frozen", False):
+        base = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or Path.home()
+        )
+        return base / "MahjongStudyAnalyzer" / "ocr_templates" / "mahjong_soul"
+    return Path(__file__).resolve().parent / "local_ocr_templates" / "mahjong_soul"
+
+
+DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR = _mahjong_soul_template_dir()
 SUPPORTED_HAND_SIZES = (1, 2, 4, 5, 7, 8, 10, 11, 13, 14)
 AUTO_DETECT_HAND_SIZES = (7, 8, 10, 11, 13, 14)
 
@@ -41,7 +62,7 @@ class TileRecognition:
 class OCRResult:
     """整手牌的 OCR 结构化结果。"""
 
-    image_path: Path
+    image_path: Path | None
     recognitions: tuple[TileRecognition, ...]
 
     @property
@@ -71,6 +92,7 @@ _TEMPLATE_FILES: dict[str, str] = {
     "Pin5-Dora.png": "5p",
     "Sou5-Dora.png": "5s",
 }
+_TEMPLATE_CACHE: dict[str, list[tuple[str, Any, Any, float]]] = {}
 
 
 def _cv_modules() -> tuple[Any, Any]:
@@ -171,6 +193,10 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
     if not template_dir.is_dir():
         raise OCRError(f"OCR 模板目录不存在：{template_dir}")
 
+    cache_key = str(template_dir.resolve())
+    if cache_key in _TEMPLATE_CACHE:
+        return _TEMPLATE_CACHE[cache_key]
+
     descriptors: list[tuple[str, Any, Any, float]] = []
     missing: list[str] = []
     for filename, tile in _TEMPLATE_FILES.items():
@@ -188,6 +214,7 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
 
     if missing:
         raise OCRError("OCR 模板缺失：" + "、".join(missing))
+    _TEMPLATE_CACHE[cache_key] = descriptors
     return descriptors
 
 
@@ -344,6 +371,7 @@ def build_mahjong_soul_templates(
             crop = image[y : y + height, x : x + width]
             if not cv2.imwrite(str(destination / filename), crop):
                 raise OCRError(f"无法写入 OCR 模板：{destination / filename}")
+    _TEMPLATE_CACHE.pop(str(destination), None)
     return destination
 
 
@@ -555,27 +583,17 @@ def _classify_tile(
     )
 
 
-def recognize_hand_image(
-    image_path: str | Path,
+def _recognize_hand_array(
+    image: Any,
     *,
     expected_count: int | None = None,
     template_dir: str | Path = DEFAULT_TEMPLATE_DIR,
+    image_path: Path | None = None,
 ) -> OCRResult:
-    """识别静态图片中的一行 13/14 张正立牌。
-
-    图片最好只保留底部手牌区域。若自动分割不稳定，可通过 ``expected_count``
-    明确指定 13 或 14，并把图片裁成紧密的一行。
-    """
     if expected_count is not None and expected_count not in SUPPORTED_HAND_SIZES:
         raise OCRError("expected_count 不是闭门或副露后的合法暗牌张数。")
 
     cv2, np = _cv_modules()
-    path = Path(image_path).expanduser().resolve()
-    if not path.is_file():
-        raise OCRError(f"OCR 图片不存在：{path}")
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if image is None:
-        raise OCRError(f"无法读取 OCR 图片：{path}")
     image = _composite_alpha(image, cv2, np)
     templates = _template_descriptors(Path(template_dir).expanduser().resolve(), cv2, np)
 
@@ -618,11 +636,53 @@ def recognize_hand_image(
             best_result = layout_score, recognitions
 
     assert best_result is not None
-    return OCRResult(image_path=path, recognitions=tuple(best_result[1]))
+    return OCRResult(image_path=image_path, recognitions=tuple(best_result[1]))
+
+
+def recognize_hand_frame(
+    image: Any,
+    *,
+    expected_count: int | None = None,
+    template_dir: str | Path = DEFAULT_TEMPLATE_DIR,
+) -> OCRResult:
+    """直接识别 OpenCV/NumPy 图像，用于本地实时屏幕捕获。"""
+    return _recognize_hand_array(
+        image,
+        expected_count=expected_count,
+        template_dir=template_dir,
+    )
+
+
+def recognize_hand_image(
+    image_path: str | Path,
+    *,
+    expected_count: int | None = None,
+    template_dir: str | Path = DEFAULT_TEMPLATE_DIR,
+) -> OCRResult:
+    """识别静态图片中的一行正立牌。
+
+    图片最好只保留底部手牌区域。若自动分割不稳定，可通过 ``expected_count``
+    明确指定暗牌张数，并把图片裁成紧密的一行。
+    """
+    cv2, _ = _cv_modules()
+    path = Path(image_path).expanduser().resolve()
+    if not path.is_file():
+        raise OCRError(f"OCR 图片不存在：{path}")
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise OCRError(f"无法读取 OCR 图片：{path}")
+    return _recognize_hand_array(
+        image,
+        expected_count=expected_count,
+        template_dir=template_dir,
+        image_path=path,
+    )
 
 
 def save_debug_image(result: OCRResult, output_path: str | Path) -> Path:
     """保存带检测框、牌名和置信度的调试图。"""
+    if result.image_path is None:
+        raise OCRError("实时帧没有源文件路径，无法使用 save_debug_image。")
     cv2, _ = _cv_modules()
     image = cv2.imread(str(result.image_path), cv2.IMREAD_COLOR)
     if image is None:

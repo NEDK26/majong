@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from ocr_input import (
     DEFAULT_TEMPLATE_DIR,
+    _mahjong_soul_template_dir,
     build_mahjong_soul_templates,
     recognize_hand_image,
 )
@@ -80,6 +82,18 @@ class OCRTests(unittest.TestCase):
 
         self.assertEqual(result.tiles, expected)
         self.assertGreaterEqual(result.minimum_confidence, 0.62)
+
+    def test_frozen_app_uses_persistent_windows_data_directory(self) -> None:
+        with (
+            patch.dict("os.environ", {"LOCALAPPDATA": "C:/Users/Test/AppData/Local"}, clear=False),
+            patch("ocr_input.sys.frozen", True, create=True),
+        ):
+            result = _mahjong_soul_template_dir()
+
+        self.assertEqual(
+            result.as_posix(),
+            "C:/Users/Test/AppData/Local/MahjongStudyAnalyzer/ocr_templates/mahjong_soul",
+        )
 
     def test_builds_34_templates_from_reference_layout(self) -> None:
         try:

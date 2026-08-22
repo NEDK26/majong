@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
+import os
+import sys
 
 from analyzer import calculate_shanten, core_analyze
 from input_layer import hand_input
@@ -32,6 +35,20 @@ DEMO_HANDS: tuple[tuple[str, list[str]], ...] = (
         ["1m", "1m", "2m", "2m", "3p", "3p", "4p", "4p", "5s", "5s", "6s", "6s", "7z", "9m"],
     ),
 )
+
+
+def is_frozen_app() -> bool:
+    """是否正在 PyInstaller 打包后的程序中运行。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def native_message(title: str, message: str, *, error: bool = False) -> None:
+    """EXE 无控制台时用 Windows 对话框反馈校准结果和启动错误。"""
+    if is_frozen_app() and os.name == "nt":
+        icon = 0x10 if error else 0x40
+        ctypes.windll.user32.MessageBoxW(None, message, title, icon)
+        return
+    print(f"{title}：{message}")
 
 
 def analyze_and_print(hand_tiles: list[int]) -> None:
@@ -133,6 +150,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REFERENCE_IMAGE",
         help="从雀魂 34 种牌说明图生成本机专用模板",
     )
+    sources.add_argument(
+        "--live",
+        action="store_true",
+        help="启动仅监听 127.0.0.1 的本地实时研究面板",
+    )
+    parser.add_argument(
+        "--live-port",
+        type=int,
+        default=8765,
+        help="本地研究面板端口，默认 8765",
+    )
     parser.add_argument(
         "--ocr-count",
         type=int,
@@ -162,20 +190,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="保存带检测框和置信度的调试图片",
     )
     sources.add_argument("--demo", action="store_true", help="运行内置的 3 组测试手牌")
+    parser.add_argument(
+        "drop_image",
+        nargs="?",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     try:
+        explicit_source = any(
+            (
+                args.hand,
+                args.ocr,
+                args.ocr_calibrate_mahjong_soul,
+                args.live,
+                args.demo,
+            )
+        )
+        if args.drop_image and explicit_source:
+            raise HandValidationError("拖入图片不能与其他输入参数同时使用。")
         if not 0.0 <= args.ocr_min_confidence <= 1.0:
             raise HandValidationError("--ocr-min-confidence 必须在 0～1 之间。")
-        if args.ocr_calibrate_mahjong_soul:
+        calibration_image = args.ocr_calibrate_mahjong_soul or args.drop_image
+        if calibration_image:
             template_path = build_mahjong_soul_templates(
-                args.ocr_calibrate_mahjong_soul
+                calibration_image
             )
-            print(f"雀魂 OCR 模板已生成：{template_path}")
-            print("之后使用 --ocr 时会自动优先加载该模板。")
+            if is_frozen_app():
+                native_message(
+                    "牌理镜 · 校准完成",
+                    f"34 种牌模板已保存到：\n{template_path}\n\n现在可以双击 EXE 开始测试。",
+                )
+            else:
+                print(f"雀魂 OCR 模板已生成：{template_path}")
+                print("之后使用 --ocr 时会自动优先加载该模板。")
+        elif args.live:
+            from live_monitor import run_live_monitor
+
+            run_live_monitor(port=args.live_port)
         elif args.demo:
             run_demos()
         elif args.ocr:
@@ -189,10 +244,17 @@ def main() -> None:
             )
         elif args.hand:
             analyze_and_print(hand_input(args.hand))
+        elif is_frozen_app():
+            from live_monitor import run_live_monitor
+
+            run_live_monitor(port=args.live_port)
         else:
             run_interactive()
-    except (HandValidationError, ValueError) as exc:
-        raise SystemExit(f"输入错误：{exc}") from exc
+    except (HandValidationError, ValueError, RuntimeError) as exc:
+        if is_frozen_app():
+            native_message("牌理镜 · 启动失败", str(exc), error=True)
+            return
+        raise SystemExit(f"错误：{exc}") from exc
 
 
 if __name__ == "__main__":

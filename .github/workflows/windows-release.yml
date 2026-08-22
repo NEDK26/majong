@@ -1,0 +1,66 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: >-
+          python -m pip install
+          -r requirements.txt
+          pyinstaller==6.15.0
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build single-file application
+        shell: cmd
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --noconsole
+          --name MahjongStudyAnalyzer
+          --add-data "assets\ocr_templates;assets\ocr_templates"
+          --add-data "monitor_web;monitor_web"
+          --collect-all mahjong
+          main.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MahjongStudyAnalyzer-Windows
+          path: dist/MahjongStudyAnalyzer.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MahjongStudyAnalyzer.exe
+          generate_release_notes: true
+          body: |
+            Windows 单文件版本，下载 `MahjongStudyAnalyzer.exe` 后可直接双击运行。
+
+            首次使用雀魂牌面识别时，请把 34 种牌总览图拖到 EXE 上完成本地校准，
+            然后再次双击 EXE 打开本地研究面板。程序只监听 `127.0.0.1`。
