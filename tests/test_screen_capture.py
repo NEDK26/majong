@@ -5,11 +5,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from live_monitor import HOST, _analysis_payload, analyze_capture
+from desktop_utils import fit_preview_size, friendly_error_message, shanten_label
 from ocr_input import OCRResult, TileRecognition
+from screen_capture import analysis_payload, analyze_capture, clamp_region
 
 
-class LiveMonitorTests(unittest.TestCase):
+class ScreenCaptureTests(unittest.TestCase):
     @staticmethod
     def _ocr_result() -> OCRResult:
         tiles = ["6p", "7p", "4s", "4s", "6s", "7s", "8s", "4z"]
@@ -26,11 +27,8 @@ class LiveMonitorTests(unittest.TestCase):
             ),
         )
 
-    def test_service_is_loopback_only(self) -> None:
-        self.assertEqual(HOST, "127.0.0.1")
-
     def test_analysis_payload_supports_open_hand(self) -> None:
-        payload = _analysis_payload(self._ocr_result())
+        payload = analysis_payload(self._ocr_result())
 
         self.assertEqual(payload["tiles"], ["6p", "7p", "4s", "4s", "6s", "7s", "8s", "4z"])
         self.assertEqual(payload["shanten"], 0)
@@ -45,15 +43,32 @@ class LiveMonitorTests(unittest.TestCase):
         frame = np.zeros((120, 800, 3), dtype=np.uint8)
         with (
             patch(
-                "live_monitor.capture_screen",
+                "screen_capture.capture_screen",
                 return_value=(frame, {"left": 0, "top": 700, "width": 800, "height": 120}),
             ),
-            patch("live_monitor.recognize_hand_frame", return_value=self._ocr_result()),
+            patch("screen_capture.recognize_hand_frame", return_value=self._ocr_result()),
         ):
             payload = analyze_capture(1, {"x": 0, "y": 700, "width": 800, "height": 120}, 8)
 
         self.assertEqual(payload["recommendations"], ["4z"])
         self.assertEqual(payload["captureRegion"]["height"], 120)
+
+    def test_region_is_clamped_to_monitor(self) -> None:
+        monitor = {"left": -1920, "top": 0, "width": 1920, "height": 1080}
+        self.assertEqual(
+            clamp_region({"x": 1800, "y": 1000, "width": 500, "height": 500}, monitor),
+            {"left": -120, "top": 1000, "width": 120, "height": 80},
+        )
+
+    def test_desktop_preview_preserves_aspect_ratio(self) -> None:
+        self.assertEqual(fit_preview_size(1920, 1080, 800, 600), (800, 450))
+        self.assertEqual(fit_preview_size(640, 480, 1200, 900), (640, 480))
+        self.assertEqual(shanten_label(0), "听牌")
+
+    def test_low_level_errors_are_translated_to_chinese(self) -> None:
+        translated = friendly_error_message(PermissionError("Access denied"))
+        self.assertIn("屏幕捕获权限", translated)
+        self.assertNotIn("Access denied", translated)
 
 
 if __name__ == "__main__":

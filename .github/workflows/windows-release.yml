@@ -3,6 +3,8 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -32,6 +34,11 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
+      - name: Smoke test native Windows UI
+        run: >-
+          python -c
+          "from desktop_app import desktop_ui_smoke_test; desktop_ui_smoke_test()"
+
       - name: Build single-file application
         shell: cmd
         run: >-
@@ -42,9 +49,12 @@ jobs:
           --noconsole
           --name MahjongStudyAnalyzer
           --add-data "assets\ocr_templates;assets\ocr_templates"
-          --add-data "monitor_web;monitor_web"
           --collect-all mahjong
           main.py
+
+      - name: Smoke test packaged EXE
+        shell: cmd
+        run: dist\MahjongStudyAnalyzer.exe --smoke-test
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -60,7 +70,9 @@ jobs:
           files: dist/MahjongStudyAnalyzer.exe
           generate_release_notes: true
           body: |
-            Windows 单文件版本，下载 `MahjongStudyAnalyzer.exe` 后可直接双击运行。
+            Windows 原生桌面单文件版本。下载 `MahjongStudyAnalyzer.exe` 后直接双击，
+            不会启动浏览器，也不会开放本地网页端口。
 
             首次使用雀魂牌面识别时，请把 34 种牌总览图拖到 EXE 上完成本地校准，
-            然后再次双击 EXE 打开本地研究面板。程序只监听 `127.0.0.1`。
+            或在客户端顶部点击“校准雀魂牌面”。开始观察后，完整窗口会自动最小化，
+            只在屏幕顶部显示可鼠标穿透的提示条。

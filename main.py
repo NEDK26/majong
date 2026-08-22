@@ -9,9 +9,11 @@ import os
 import sys
 
 from analyzer import calculate_shanten, core_analyze
+from desktop_utils import friendly_error_message
 from input_layer import hand_input
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
+    DEFAULT_TEMPLATE_DIR,
     OCRResult,
     build_mahjong_soul_templates,
     recognize_hand_image,
@@ -153,13 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     sources.add_argument(
         "--live",
         action="store_true",
-        help="启动仅监听 127.0.0.1 的本地实时研究面板",
-    )
-    parser.add_argument(
-        "--live-port",
-        type=int,
-        default=8765,
-        help="本地研究面板端口，默认 8765",
+        help="启动原生桌面研究客户端",
     )
     parser.add_argument(
         "--ocr-count",
@@ -190,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="保存带检测框和置信度的调试图片",
     )
     sources.add_argument("--demo", action="store_true", help="运行内置的 3 组测试手牌")
+    parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "drop_image",
         nargs="?",
@@ -208,6 +205,7 @@ def main() -> None:
                 args.ocr_calibrate_mahjong_soul,
                 args.live,
                 args.demo,
+                args.smoke_test,
             )
         )
         if args.drop_image and explicit_source:
@@ -215,7 +213,17 @@ def main() -> None:
         if not 0.0 <= args.ocr_min_confidence <= 1.0:
             raise HandValidationError("--ocr-min-confidence 必须在 0～1 之间。")
         calibration_image = args.ocr_calibrate_mahjong_soul or args.drop_image
-        if calibration_image:
+        if args.smoke_test:
+            from screen_capture import capture_screen  # noqa: F401
+
+            # Windows 构建必须同时验证 Tk 桌面组件；非 Windows 开发机可能没有 Tk。
+            if os.name == "nt":
+                from desktop_app import desktop_ui_smoke_test
+
+                desktop_ui_smoke_test()
+            if not DEFAULT_TEMPLATE_DIR.is_dir():
+                raise RuntimeError("内置牌面模板缺失。")
+        elif calibration_image:
             template_path = build_mahjong_soul_templates(
                 calibration_image
             )
@@ -228,9 +236,9 @@ def main() -> None:
                 print(f"雀魂 OCR 模板已生成：{template_path}")
                 print("之后使用 --ocr 时会自动优先加载该模板。")
         elif args.live:
-            from live_monitor import run_live_monitor
+            from desktop_app import run_desktop_app
 
-            run_live_monitor(port=args.live_port)
+            run_desktop_app()
         elif args.demo:
             run_demos()
         elif args.ocr:
@@ -245,16 +253,29 @@ def main() -> None:
         elif args.hand:
             analyze_and_print(hand_input(args.hand))
         elif is_frozen_app():
-            from live_monitor import run_live_monitor
+            from desktop_app import run_desktop_app
 
-            run_live_monitor(port=args.live_port)
+            run_desktop_app()
         else:
             run_interactive()
     except (HandValidationError, ValueError, RuntimeError) as exc:
+        if args.smoke_test:
+            raise SystemExit(1) from exc
         if is_frozen_app():
-            native_message("牌理镜 · 启动失败", str(exc), error=True)
+            native_message(
+                "牌理镜 · 启动失败", friendly_error_message(exc), error=True
+            )
             return
         raise SystemExit(f"错误：{exc}") from exc
+    except Exception as exc:
+        if args.smoke_test:
+            raise SystemExit(1) from exc
+        if is_frozen_app():
+            native_message(
+                "牌理镜 · 启动失败", friendly_error_message(exc), error=True
+            )
+            return
+        raise
 
 
 if __name__ == "__main__":
