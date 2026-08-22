@@ -44,6 +44,13 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(HandValidationError):
             hand_input(["1m"] * 5 + ["2m"] * 4 + ["3m"] * 4)
 
+    def test_open_hand_with_two_melds_accepts_eight_concealed_tiles(self) -> None:
+        hand = hand_input(["1p", "2p", "3p", "2s", "3s", "4s", "1z", "9m"])
+        result = core_analyze(hand)
+
+        self.assertEqual(result.mode, "discard")
+        self.assertTrue(result.candidates)
+
 
 if __name__ == "__main__":
     unittest.main()

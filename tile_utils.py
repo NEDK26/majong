@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 
 SUITS = ("m", "p", "s", "z")
+VALID_HAND_TOTALS = frozenset({1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
 TILE_NAMES: tuple[str, ...] = tuple(
     [f"{number}m" for number in range(1, 10)]
     + [f"{number}p" for number in range(1, 10)]
@@ -66,7 +67,7 @@ def tiles_from_34(tiles_34: Sequence[int]) -> list[str]:
 
 
 def validate_34_array(tiles_34: Sequence[int], allowed_totals: set[int] | None = None) -> None:
-    """校验内部 34 数组；默认允许 13 张待摸牌或 14 张待舍牌状态。"""
+    """校验内部 34 数组；同时支持闭门和已有副露的合法张数。"""
     if isinstance(tiles_34, (str, bytes)) or len(tiles_34) != 34:
         raise HandValidationError("内部手牌必须是长度为 34 的计数数组。")
 
@@ -76,7 +77,7 @@ def validate_34_array(tiles_34: Sequence[int], allowed_totals: set[int] | None =
                 f"{tile_index_to_name(index)} 的数量必须是 0～4 的整数，收到：{count!r}"
             )
 
-    totals = allowed_totals if allowed_totals is not None else {13, 14}
+    totals = allowed_totals if allowed_totals is not None else VALID_HAND_TOTALS
     total = sum(tiles_34)
     if total not in totals:
         expected = "、".join(str(value) for value in sorted(totals))

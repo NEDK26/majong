@@ -27,12 +27,12 @@ def _parse_manual_text(raw: str) -> list[str]:
 def hand_input(source_tiles: Sequence[str] | None = None) -> list[int]:
     """输入层：返回核心算法使用的 34 长度手牌数组。
 
-    当前 ``source_tiles`` 为空时从命令行读取。接入 OCR 后，只需把 OCR 的
-    标准化字符串列表直接作为 ``source_tiles`` 传入，不需要改动分析核心。
+    当前 ``source_tiles`` 为空时从命令行读取。OCR 模块把识别得到的标准化
+    字符串列表作为 ``source_tiles`` 传入，不需要改动分析核心。
     """
     if source_tiles is None:
         raw = input(
-            "请输入 13 张或 14 张手牌\n"
+            "请输入暗牌（闭门通常为 13/14 张；副露后也支持 10/11、7/8、4/5 张）\n"
             '（例如 ["1m","2m","3m",...]，也可用空格分隔）：\n> '
         )
         tile_names = _parse_manual_text(raw)

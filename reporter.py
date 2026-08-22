@@ -48,10 +48,14 @@ def report_printer(result: AnalysisResult, original_shanten: int) -> None:
         return
 
     if result.mode == "draw":
-        print("状态：13 张待摸牌；尚未摸到第 14 张，因此没有合法候选舍牌。")
+        current_count = sum(result.original_hand)
+        print(
+            f"状态：{current_count} 张待摸牌；当前没有合法候选舍牌。"
+            "张数少于 13 时，缺少的面子按已副露处理。"
+        )
         print("有效摸牌：", _effective_text(result.effective_draws))
         print(f"理论有效枚数：{result.draw_ukeire}")
-        print("摸牌后请把第 14 张加入手牌，再进行舍牌分析。")
+        print(f"摸牌后请把第 {current_count + 1} 张加入暗牌，再进行舍牌分析。")
         print("=" * 68)
         return
 
