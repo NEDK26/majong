@@ -7,7 +7,14 @@ from unittest.mock import patch
 
 from desktop_utils import fit_preview_size, friendly_error_message, shanten_label
 from ocr_input import OCRResult, TileRecognition
-from screen_capture import analysis_payload, analyze_capture, clamp_region
+from screen_capture import (
+    ScreenCaptureError,
+    _dxgi_output_for_monitor,
+    analysis_payload,
+    analyze_capture,
+    capture_screen,
+    clamp_region,
+)
 
 
 class ScreenCaptureTests(unittest.TestCase):
@@ -59,6 +66,49 @@ class ScreenCaptureTests(unittest.TestCase):
             clamp_region({"x": 1800, "y": 1000, "width": 500, "height": 500}, monitor),
             {"left": -120, "top": 1000, "width": 120, "height": 80},
         )
+
+    def test_dxgi_output_is_matched_by_monitor_resolution(self) -> None:
+        class FakeDxcam:
+            @staticmethod
+            def output_info() -> str:
+                return (
+                    "Device[0] Output[0]: Res:(2560, 1440) Rot:0 Primary:True\n"
+                    "Device[0] Output[1]: Res:(1920, 1080) Rot:0 Primary:False\n"
+                )
+
+        self.assertEqual(
+            _dxgi_output_for_monitor(
+                FakeDxcam(), 1, {"width": 1920, "height": 1080}
+            ),
+            (0, 1),
+        )
+
+    def test_windows_auto_capture_falls_back_from_dxgi_to_mss(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"NumPy is not installed: {exc}")
+
+        frame = np.full((40, 80, 3), 90, dtype=np.uint8)
+        fake_cv2 = object()
+        fake_mss = object()
+        with (
+            patch("screen_capture._screen_modules", return_value=(fake_cv2, fake_mss, np)),
+            patch(
+                "screen_capture._selected_monitor",
+                return_value={"left": 0, "top": 0, "width": 80, "height": 40},
+            ),
+            patch("screen_capture._is_windows", return_value=True),
+            patch(
+                "screen_capture._capture_with_dxgi",
+                side_effect=ScreenCaptureError("DXGI 测试失败"),
+            ),
+            patch("screen_capture._capture_with_mss", return_value=frame),
+        ):
+            captured, region = capture_screen(1, backend="auto")
+
+        self.assertIs(captured, frame)
+        self.assertEqual(region["backend"], "MSS")
 
     def test_desktop_preview_preserves_aspect_ratio(self) -> None:
         self.assertEqual(fit_preview_size(1920, 1080, 800, 600), (800, 450))

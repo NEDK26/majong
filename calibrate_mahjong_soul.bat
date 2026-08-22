@@ -1,10 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
 if "%~1"=="" (
-  echo Drag the Mahjong Soul 34-tile guide image onto this BAT file.
-  echo Or run: calibrate_mahjong_soul.bat "C:\path\to\tile-guide.png"
+  echo 请把雀魂 34 种牌总览图拖到这个 BAT 文件上。
+  echo 也可以运行：calibrate_mahjong_soul.bat "C:\图片路径\麻将牌.png"
   pause
   exit /b 1
 )
@@ -22,11 +23,11 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt || goto :error
 ".venv\Scripts\python.exe" main.py --ocr-calibrate-mahjong-soul "%~1" || goto :error
 echo.
-echo Mahjong Soul templates are ready. You can now run start_live_viewer.bat.
+echo 雀魂牌面模板已经准备完成，现在可以运行 start_live_viewer.bat。
 pause
 exit /b 0
 
 :error
-echo Calibration failed.
+echo 校准失败。请确认图片是包含 34 种牌的雀魂“麻将牌”总览图。
 pause
 exit /b 1

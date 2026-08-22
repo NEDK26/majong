@@ -14,6 +14,7 @@ htmlcov/
 ocr-debug*.png
 local_ocr_samples/
 local_ocr_templates/
+local_settings.json
 
 .DS_Store
 .idea/

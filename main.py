@@ -215,7 +215,7 @@ def main() -> None:
         calibration_image = args.ocr_calibrate_mahjong_soul or args.drop_image
         if args.smoke_test:
             from ocr_input import _cv_modules, _template_descriptors
-            from screen_capture import _screen_modules
+            from screen_capture import _dxcam_module, _screen_modules
 
             cv2, np = _cv_modules()
             _screen_modules()
@@ -227,6 +227,7 @@ def main() -> None:
             if os.name == "nt":
                 from desktop_app import desktop_ui_smoke_test
 
+                _dxcam_module()
                 desktop_ui_smoke_test()
             if not DEFAULT_TEMPLATE_DIR.is_dir():
                 raise RuntimeError("内置牌面模板缺失。")
