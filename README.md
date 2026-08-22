@@ -19,8 +19,9 @@
 
 Windows Defender 可能会对新发布、未签名的个人 EXE 显示信誉提示；可以先在
 Release 页面核对来源。程序不会开放网页服务，也不会向公网传输截图。
-构建流程会剔除重复图像库及程序未使用的网络模块，并压缩内置牌图；
-OpenCV 图像核心、NumPy、Tk 和向听计算库仍会保留，以保证实时 OCR 工作。
+GitHub Actions 会根据 `requirements.txt` 自动下载标准依赖，再把 OpenCV、NumPy、
+Tk、向听计算库和压缩后的内置牌图一并打进 EXE。Windows 用户只需下载 EXE，
+运行时不需要再联网下载依赖，也不需要安装 Python。
 
 ## 安装与运行
 
