@@ -4,10 +4,16 @@ import unittest
 
 from analyzer import calculate_shanten, core_analyze
 from input_layer import hand_input
-from tile_utils import HandValidationError
+from tile_utils import HandValidationError, tile_name_to_chinese
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_user_facing_tile_names_are_chinese(self) -> None:
+        self.assertEqual(tile_name_to_chinese("8p"), "八筒")
+        self.assertEqual(tile_name_to_chinese("6s"), "六索")
+        self.assertEqual(tile_name_to_chinese("4z"), "北")
+        self.assertEqual(tile_name_to_chinese("7z"), "中")
+
     def test_thirteen_tile_ready_hand_reports_winning_draw(self) -> None:
         hand = hand_input(
             ["1m", "2m", "3m", "1p", "2p", "3p", "1s", "2s", "3s", "7s", "8s", "9s", "1z"]

@@ -24,6 +24,7 @@ from ocr_input import (
     build_mahjong_soul_templates,
 )
 from screen_capture import analyze_capture, capture_screen, list_monitors
+from tile_utils import tile_name_to_chinese
 
 
 COLORS = {
@@ -391,28 +392,27 @@ class CompactOverlayApp:
         candidates = list(data.get("candidates", []))
         if recommendations and candidates:
             best = candidates[0]
-            discard = " / ".join(recommendations)
+            discard = " / ".join(tile_name_to_chinese(tile) for tile in recommendations)
             self.main_var.set(
-                f"推荐切 {discard}　·　{shanten_label(int(best['shanten']))}　·　"
-                f"有效进张 {best['ukeire']} 枚"
+                f"建议打：{discard}　·　{shanten_label(int(best['shanten']))}　·　"
+                f"有效牌共 {best['ukeire']} 张"
             )
             effective = "、".join(
-                f"{item['tile']}×{item['remaining']}"
+                f"{tile_name_to_chinese(item['tile'])}×{item['remaining']}"
                 for item in best.get("effectiveTiles", [])
             )
-            self.meta_var.set(
-                f"手牌 {' '.join(data['tiles'])}　｜　进张 {effective or '无'}"
-            )
+            self.meta_var.set(f"有效牌：{effective or '无'}")
         elif data.get("mode") == "draw":
             effective = list(data.get("effectiveDraws", []))
             self.main_var.set(
                 f"当前 {shanten_label(int(data['shanten']))}　·　"
-                f"有效摸牌 {data.get('drawUkeire', 0)} 枚"
+                f"有效牌共 {data.get('drawUkeire', 0)} 张"
             )
             self.meta_var.set(
-                "进张 "
+                "有效牌："
                 + "、".join(
-                    f"{item['tile']}×{item['remaining']}" for item in effective
+                    f"{tile_name_to_chinese(item['tile'])}×{item['remaining']}"
+                    for item in effective
                 )
             )
         elif data.get("mode") == "agari":
@@ -420,7 +420,12 @@ class CompactOverlayApp:
             self.meta_var.set("牌理镜仍会继续观察下一次手牌变化")
         else:
             self.main_var.set("已识别手牌，等待出现可舍牌状态")
-            self.meta_var.set("手牌 " + " ".join(data.get("tiles", [])))
+            self.meta_var.set(
+                "手牌 "
+                + " ".join(
+                    tile_name_to_chinese(tile) for tile in data.get("tiles", [])
+                )
+            )
         self._schedule_analysis()
 
     def _analysis_failed(self, exc: Exception) -> None:

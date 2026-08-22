@@ -6,7 +6,7 @@ import json
 import sys
 
 from analyzer import AnalysisResult, DiscardCandidate, EffectiveTile
-from tile_utils import tiles_from_34
+from tile_utils import tile_name_to_chinese, tiles_from_34
 
 
 def _shanten_text(shanten: int) -> str:
@@ -20,7 +20,10 @@ def _shanten_text(shanten: int) -> str:
 def _effective_text(effective_tiles: tuple[EffectiveTile, ...]) -> str:
     if not effective_tiles:
         return "无"
-    return "、".join(f"{item.tile}×{item.remaining}" for item in effective_tiles)
+    return "、".join(
+        f"{tile_name_to_chinese(item.tile)}×{item.remaining}"
+        for item in effective_tiles
+    )
 
 
 def _highlight(text: str) -> str:
@@ -39,7 +42,8 @@ def report_printer(result: AnalysisResult, original_shanten: int) -> None:
     hand_names = tiles_from_34(result.original_hand)
     print("\n" + "=" * 68)
     print("立直麻将手牌分析（仅供算法学习研究）")
-    print("当前手牌：", json.dumps(hand_names, ensure_ascii=False))
+    chinese_hand = [tile_name_to_chinese(tile) for tile in hand_names]
+    print("当前手牌：", json.dumps(chinese_hand, ensure_ascii=False))
     print("当前向听数：", _shanten_text(original_shanten))
 
     if result.mode == "agari":
@@ -66,7 +70,7 @@ def report_printer(result: AnalysisResult, original_shanten: int) -> None:
 
     best = result.candidates[0]
     best_discards = [
-        candidate.discard
+        tile_name_to_chinese(candidate.discard)
         for candidate in result.candidates
         if _is_best(candidate, best)
     ]
@@ -79,7 +83,7 @@ def report_printer(result: AnalysisResult, original_shanten: int) -> None:
     for rank, candidate in enumerate(result.candidates, start=1):
         marker = "★" if _is_best(candidate, best) else " "
         line = (
-            f"{marker} {rank:>2}. 打 {candidate.discard:<2} | "
+            f"{marker} {rank:>2}. 打 {tile_name_to_chinese(candidate.discard):<3} | "
             f"打后向听 {_shanten_text(candidate.shanten):<10} | "
             f"有效进张：{_effective_text(candidate.effective_tiles)} | "
             f"总枚数：{candidate.ukeire}"

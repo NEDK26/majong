@@ -14,6 +14,8 @@ TILE_NAMES: tuple[str, ...] = tuple(
     + [f"{number}z" for number in range(1, 8)]
 )
 TILE_TO_INDEX = {tile: index for index, tile in enumerate(TILE_NAMES)}
+CHINESE_NUMBERS = ("一", "二", "三", "四", "五", "六", "七", "八", "九")
+HONOR_NAMES = ("东", "南", "西", "北", "白", "发", "中")
 
 
 class HandValidationError(ValueError):
@@ -38,6 +40,18 @@ def tile_index_to_name(index: int) -> str:
     if not 0 <= index < len(TILE_NAMES):
         raise HandValidationError(f"牌索引必须在 0～33，收到：{index}")
     return TILE_NAMES[index]
+
+
+def tile_name_to_chinese(tile: str) -> str:
+    """把内部牌名转换成适合界面展示的中文牌名。"""
+    index = tile_name_to_index(tile)
+    if index < 9:
+        return f"{CHINESE_NUMBERS[index]}万"
+    if index < 18:
+        return f"{CHINESE_NUMBERS[index - 9]}筒"
+    if index < 27:
+        return f"{CHINESE_NUMBERS[index - 18]}索"
+    return HONOR_NAMES[index - 27]
 
 
 def tiles_to_34(tiles: Sequence[str]) -> list[int]:
