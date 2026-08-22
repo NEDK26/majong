@@ -42,16 +42,29 @@ jobs:
       - name: Build single-file application
         run: python -m PyInstaller --noconfirm --clean mahjong_windows.spec
 
-      - name: Smoke test packaged EXE
-        shell: cmd
-        run: dist\MahjongStudyAnalyzer.exe --smoke-test
+      - name: Report executable size
+        shell: pwsh
+        run: |
+          $size = (Get-Item dist\MahjongStudyAnalyzer.exe).Length
+          $mib = [math]::Round($size / 1MB, 2)
+          "Windows EXE: $mib MiB ($size bytes)" | Tee-Object -FilePath exe-size.txt
+          "### Windows EXE: $mib MiB" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: MahjongStudyAnalyzer-Windows
-          path: dist/MahjongStudyAnalyzer.exe
+          path: |
+            dist/MahjongStudyAnalyzer.exe
+            exe-size.txt
           if-no-files-found: error
+
+      - name: Smoke test packaged EXE
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath dist\MahjongStudyAnalyzer.exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')

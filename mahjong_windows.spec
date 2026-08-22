@@ -27,15 +27,15 @@ analysis = Analysis(
     optimize=1,
 )
 
-# opencv-python-headless 仍附带约 30 MB 的视频编解码器；本程序只处理静态帧，
-# 不打开或写入视频，因此可以安全移除。
+python_archive = PYZ(analysis.pure)
+
+# OpenCV 官方 wheel 仍附带约 30 MB 的视频编解码器；本程序只处理静态屏幕帧，
+# 不打开或写入视频。Windows 构建会在打包后实际导入 cv2 并运行颜色转换自检。
 runtime_binaries = [
     item
     for item in analysis.binaries
     if "opencv_videoio_ffmpeg" not in item[0].lower()
 ]
-
-python_archive = PYZ(analysis.pure)
 
 executable = EXE(
     python_archive,
@@ -51,7 +51,8 @@ executable = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
-    disable_windowed_traceback=False,
+    # 自动化自检遇到启动错误时直接返回非零，不弹出会挂住构建的异常对话框。
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
