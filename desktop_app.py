@@ -151,8 +151,8 @@ class MahjongDesktopApp:
             font=("Microsoft YaHei UI", 9, "bold"),
         ).pack(side="right", padx=8)
 
-        body = tk.Frame(self.root, bg=COLORS["green_pale"], padx=18, pady=(0, 18))
-        body.pack(fill="both", expand=True)
+        body = tk.Frame(self.root, bg=COLORS["green_pale"], padx=18)
+        body.pack(fill="both", expand=True, pady=(0, 18))
         body.grid_columnconfigure(0, weight=3, uniform="main")
         body.grid_columnconfigure(1, weight=2, uniform="main")
         body.grid_rowconfigure(0, weight=1)
@@ -294,8 +294,8 @@ class MahjongDesktopApp:
             side="right"
         )
 
-        actions = tk.Frame(parent, bg=COLORS["paper"], pady=(10, 0))
-        actions.pack(fill="x")
+        actions = tk.Frame(parent, bg=COLORS["paper"])
+        actions.pack(fill="x", pady=(10, 0))
         self.start_button = self._button(
             actions,
             "开始实时观察",
