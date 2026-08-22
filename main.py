@@ -230,6 +230,12 @@ def main() -> None:
                 desktop_ui_smoke_test()
             if not DEFAULT_TEMPLATE_DIR.is_dir():
                 raise RuntimeError("内置牌面模板缺失。")
+
+            # PyInstaller 的无控制台单文件进程在 GitHub Windows runner 上可能会
+            # 卡在第三方原生模块的解释器清理阶段。这里已经完成 cv2、NumPy、mss、
+            # OCR 模板和完整 Tk 界面的初始化验证，打包自检可直接结束进程。
+            if is_frozen_app() and os.name == "nt":
+                os._exit(0)
         elif calibration_image:
             template_path = build_mahjong_soul_templates(
                 calibration_image
