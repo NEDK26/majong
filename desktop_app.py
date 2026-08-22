@@ -643,9 +643,9 @@ class MahjongDesktopApp:
         if self.preview_frame is None:
             return
         try:
-            from PIL import Image, ImageTk  # type: ignore[import-not-found]
+            import cv2  # type: ignore[import-not-found]
         except ImportError:
-            self._show_error(RuntimeError("缺少 Pillow 图像组件。"))
+            self._show_error(RuntimeError("缺少 OpenCV 图像组件。"))
             return
 
         canvas_width = max(100, self.canvas.winfo_width() - 12)
@@ -654,11 +654,23 @@ class MahjongDesktopApp:
         display_width, display_height = fit_preview_size(
             source_width, source_height, canvas_width, canvas_height
         )
-        rgb = self.preview_frame[:, :, ::-1]
-        image = Image.fromarray(rgb).resize(
-            (display_width, display_height), Image.Resampling.LANCZOS
+        interpolation = (
+            cv2.INTER_AREA
+            if display_width < source_width or display_height < source_height
+            else cv2.INTER_LINEAR
         )
-        self.preview_photo = ImageTk.PhotoImage(image)
+        resized = cv2.resize(
+            self.preview_frame,
+            (display_width, display_height),
+            interpolation=interpolation,
+        )
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        # Tk 原生支持 PPM；复用 OpenCV 生成预览，避免再打包一整套 Pillow。
+        ppm = (
+            f"P6\n{display_width} {display_height}\n255\n".encode("ascii")
+            + rgb.tobytes()
+        )
+        self.preview_photo = tk.PhotoImage(data=ppm, format="PPM")
         left = (self.canvas.winfo_width() - display_width) // 2
         top = (self.canvas.winfo_height() - display_height) // 2
         self.preview_box = (left, top, display_width, display_height)
@@ -1056,5 +1068,9 @@ def desktop_ui_smoke_test() -> None:
     root = tk.Tk()
     root.withdraw()
     app = MahjongDesktopApp(root)
+    # 验证精简版使用的 Tk 原生 PPM 预览路径可用。
+    preview = tk.PhotoImage(data=b"P6\n1 1\n255\n\x12\x3e\x39", format="PPM")
+    if preview.width() != 1 or preview.height() != 1:
+        raise RuntimeError("原生预览图像组件初始化失败。")
     root.update_idletasks()
     app.close()

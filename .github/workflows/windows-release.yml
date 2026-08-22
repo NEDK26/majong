@@ -40,17 +40,7 @@ jobs:
           "from desktop_app import desktop_ui_smoke_test; desktop_ui_smoke_test()"
 
       - name: Build single-file application
-        shell: cmd
-        run: >-
-          python -m PyInstaller
-          --noconfirm
-          --clean
-          --onefile
-          --noconsole
-          --name MahjongStudyAnalyzer
-          --add-data "assets\ocr_templates;assets\ocr_templates"
-          --collect-all mahjong
-          main.py
+        run: python -m PyInstaller --noconfirm --clean mahjong_windows.spec
 
       - name: Smoke test packaged EXE
         shell: cmd

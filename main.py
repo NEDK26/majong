@@ -214,7 +214,14 @@ def main() -> None:
             raise HandValidationError("--ocr-min-confidence 必须在 0～1 之间。")
         calibration_image = args.ocr_calibrate_mahjong_soul or args.drop_image
         if args.smoke_test:
-            from screen_capture import capture_screen  # noqa: F401
+            from ocr_input import _cv_modules, _template_descriptors
+            from screen_capture import _screen_modules
+
+            cv2, np = _cv_modules()
+            _screen_modules()
+            _template_descriptors(DEFAULT_TEMPLATE_DIR, cv2, np)
+            sample = np.zeros((12, 12, 3), dtype=np.uint8)
+            cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
 
             # Windows 构建必须同时验证 Tk 桌面组件；非 Windows 开发机可能没有 Tk。
             if os.name == "nt":
