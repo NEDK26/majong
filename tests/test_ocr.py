@@ -175,7 +175,9 @@ class OCRTests(unittest.TestCase):
             output = Path(directory) / "templates"
             source.mkdir()
             sample = self._load_tile(cv2, np, "Pin9.png", 60, 88)
-            self.assertTrue(cv2.imwrite(str(source / "九筒.png"), sample))
+            success, encoded = cv2.imencode(".png", sample)
+            self.assertTrue(success)
+            (source / "九筒.png").write_bytes(encoded.tobytes())
 
             _, first_imported, first_tiles = import_labeled_template_folder(
                 source, output
