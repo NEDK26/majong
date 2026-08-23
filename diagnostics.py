@@ -99,6 +99,8 @@ def recognition_details(recognitions: Any) -> list[dict[str, Any]]:
                 "牌": tile_name_to_chinese(item.tile),
                 "内部牌名": item.tile,
                 "置信度": round(float(item.confidence), 4),
+                "匹配分": round(float(item.match_score), 4),
+                "区分度": round(float(item.classification_margin), 4),
                 "检测框": list(item.box),
                 "候选": [
                     {

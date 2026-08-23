@@ -18,7 +18,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Callable
 
-from desktop_utils import friendly_error_message, shanten_label
+from desktop_utils import AnalysisStabilizer, friendly_error_message, shanten_label
 from diagnostics import diagnostics_directory, log_event, log_exception
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
@@ -72,6 +72,7 @@ class CompactOverlayApp:
         self.templates_ready = False
         self.initializing_templates = False
         self.timer_id: str | None = None
+        self.analysis_stabilizer = AnalysisStabilizer()
         self.settings_window: tk.Toplevel | None = None
         self.selector_window: tk.Toplevel | None = None
         self.selector_frame: Any | None = None
@@ -479,7 +480,25 @@ class CompactOverlayApp:
 
         recommendations = list(data.get("recommendations", []))
         candidates = list(data.get("candidates", []))
-        if recommendations and candidates:
+        mode = str(data.get("mode", ""))
+        if mode != "uncertain" and not self.analysis_stabilizer.should_accept(
+            (recognized_count, mode)
+        ):
+            self.status_var.set(f"{backend} · 正在确认 {recognized_count} 张")
+            self.main_var.set("正在确认手牌张数…")
+            self.meta_var.set("连续两帧一致后再更新牌理结果")
+            self._schedule_analysis()
+            return
+
+        if mode == "uncertain":
+            positions = "、".join(
+                str(value) for value in data.get("uncertainPositions", [])
+            )
+            self.main_var.set("识别结果不稳定，暂不提供舍牌建议")
+            self.meta_var.set(
+                f"请等待下一帧或重新框选；不确定位置：{positions or '自动修正牌'}"
+            )
+        elif recommendations and candidates:
             best = candidates[0]
             discard = " / ".join(tile_name_to_chinese(tile) for tile in recommendations)
             self.main_var.set(
@@ -682,6 +701,7 @@ class CompactOverlayApp:
         )
 
     def _settings_changed(self, _: Any = None) -> None:
+        self.analysis_stabilizer.reset()
         selected = self.monitor_var.get()
         for monitor in self.monitors:
             if self._monitor_label(monitor) == selected:
@@ -725,6 +745,7 @@ class CompactOverlayApp:
 
     def _calibration_done(self, _: Any) -> None:
         log_event("总览图校准完成")
+        self.analysis_stabilizer.reset()
         self.templates_ready = False
         self.status_var.set("校准完成")
         self.main_var.set("牌面模板已保存，可以开始读取游戏画面")
@@ -747,12 +768,15 @@ class CompactOverlayApp:
         )
 
     def _sample_import_done(self, result: tuple[Path, int, int]) -> None:
+        self.analysis_stabilizer.reset()
         self.templates_ready = False
         _, sample_count, tile_count = result
         log_event("拆分牌样本导入完成", 样本数量=sample_count, 覆盖牌种=tile_count)
-        self.status_var.set("样本已导入")
+        self.status_var.set("样本已导入" if sample_count else "没有新增样本")
         self.main_var.set(
             f"已导入 {sample_count} 张样本，覆盖 {tile_count} 种牌"
+            if sample_count
+            else f"已跳过重复文件，现有模板覆盖 {tile_count} 种牌"
         )
         self.meta_var.set("样本只保存在本机，不会上传；正在重新识别")
         self.start()
@@ -866,6 +890,7 @@ class CompactOverlayApp:
                 canvas.itemconfigure(self.selector_rect, outline=COLORS["red"])
             return
         self.region = {"x": left, "y": top, "width": width, "height": height}
+        self.analysis_stabilizer.reset()
         log_event("手牌区域已框选", 区域=self.region, 显示器=self.monitor_id)
         self._save_preferences()
         self._close_selector(False)

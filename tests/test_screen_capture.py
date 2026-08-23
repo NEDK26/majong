@@ -5,7 +5,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from desktop_utils import fit_preview_size, friendly_error_message, shanten_label
+from desktop_utils import (
+    AnalysisStabilizer,
+    fit_preview_size,
+    friendly_error_message,
+    shanten_label,
+)
 from ocr_input import OCRResult, TileRecognition
 from screen_capture import (
     _DXGI_CAMERAS,
@@ -43,6 +48,26 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertEqual(payload["tiles"], ["6p", "7p", "4s", "4s", "6s", "7s", "8s", "4z"])
         self.assertEqual(payload["shanten"], 0)
         self.assertEqual(payload["recommendations"], ["4z"])
+
+    def test_ambiguous_tile_does_not_produce_a_discard_recommendation(self) -> None:
+        recognitions = list(self._ocr_result().recognitions)
+        first = recognitions[0]
+        recognitions[0] = TileRecognition(
+            tile=first.tile,
+            confidence=0.90,
+            alternatives=(("7p", 0.89),),
+            box=first.box,
+            match_score=0.90,
+        )
+
+        payload = analysis_payload(
+            OCRResult(image_path=None, recognitions=tuple(recognitions))
+        )
+
+        self.assertEqual(payload["mode"], "uncertain")
+        self.assertEqual(payload["uncertainPositions"], [1])
+        self.assertIsNone(payload["shanten"])
+        self.assertEqual(payload["recommendations"], [])
 
     def test_duplicate_ocr_tiles_are_corrected_before_hand_validation(self) -> None:
         recognitions = []
@@ -195,6 +220,17 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertEqual(fit_preview_size(1920, 1080, 800, 600), (800, 450))
         self.assertEqual(fit_preview_size(640, 480, 1200, 900), (640, 480))
         self.assertEqual(shanten_label(0), "听牌")
+
+    def test_analysis_stabilizer_requires_repeated_count_changes(self) -> None:
+        stabilizer = AnalysisStabilizer()
+
+        self.assertFalse(stabilizer.should_accept((14, "discard")))
+        self.assertTrue(stabilizer.should_accept((14, "discard")))
+        self.assertTrue(stabilizer.should_accept((14, "discard")))
+        self.assertFalse(stabilizer.should_accept((7, "draw")))
+        self.assertTrue(stabilizer.should_accept((14, "discard")))
+        self.assertFalse(stabilizer.should_accept((7, "draw")))
+        self.assertTrue(stabilizer.should_accept((7, "draw")))
 
     def test_low_level_errors_are_translated_to_chinese(self) -> None:
         translated = friendly_error_message(PermissionError("Access denied"))

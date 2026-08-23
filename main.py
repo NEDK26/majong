@@ -15,6 +15,7 @@ from input_layer import hand_input
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     DEFAULT_TEMPLATE_DIR,
+    MINIMUM_CLASSIFICATION_MARGIN,
     OCRResult,
     build_mahjong_soul_templates,
     recognize_hand_image,
@@ -119,13 +120,32 @@ def run_ocr(
         for index, item in enumerate(result.recognitions, start=1)
         if item.confidence < minimum_confidence
     ]
-    if low_confidence and not allow_low_confidence:
-        positions = "、".join(
-            f"第 {index} 张 {item.tile}({item.confidence:.2f})"
-            for index, item in low_confidence
-        )
+    ambiguous = [
+        (index, item)
+        for index, item in enumerate(result.recognitions, start=1)
+        if item.classification_margin < MINIMUM_CLASSIFICATION_MARGIN
+    ]
+    if (low_confidence or ambiguous) and not allow_low_confidence:
+        details: list[str] = []
+        if low_confidence:
+            details.append(
+                "低置信度："
+                + "、".join(
+                    f"第 {index} 张 {item.tile}({item.confidence:.2f})"
+                    for index, item in low_confidence
+                )
+            )
+        if ambiguous:
+            details.append(
+                "候选过于接近："
+                + "、".join(
+                    f"第 {index} 张 {item.tile}(差值 {item.classification_margin:.3f})"
+                    for index, item in ambiguous
+                )
+            )
+        positions = "；".join(details)
         raise HandValidationError(
-            f"OCR 置信度不足：{positions}。请裁紧手牌区域、提供对应皮肤模板，"
+            f"OCR 结果不够可靠：{positions}。请裁紧手牌区域、提供对应皮肤模板，"
             "或人工核对后使用 --ocr-allow-low-confidence。"
         )
 

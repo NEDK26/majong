@@ -26,6 +26,8 @@ from input_layer import hand_input
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     DEFAULT_TEMPLATE_DIR,
+    MINIMUM_CLASSIFICATION_MARGIN,
+    MINIMUM_RECOGNITION_CONFIDENCE,
     OCRResult,
     TileRecognition,
     recognize_hand_frame,
@@ -371,19 +373,36 @@ def analysis_payload(ocr_result: OCRResult) -> dict[str, Any]:
     """把 OCR 结果转换为独立于界面框架的展示数据。"""
     ocr_result, correction_count = _legalize_recognized_tiles(ocr_result)
     hand_tiles = hand_input(ocr_result.tiles)
-    shanten = calculate_shanten(hand_tiles)
-    result: AnalysisResult = core_analyze(hand_tiles)
+    margins = [
+        round(item.classification_margin, 4) for item in ocr_result.recognitions
+    ]
+    uncertain_positions = [
+        index
+        for index, item in enumerate(ocr_result.recognitions, start=1)
+        if not item.is_reliable
+    ]
     payload: dict[str, Any] = {
         "tiles": ocr_result.tiles,
         "sortedTiles": tiles_from_34(hand_tiles),
         "confidences": [round(item.confidence, 4) for item in ocr_result.recognitions],
         "minimumConfidence": round(ocr_result.minimum_confidence, 4),
+        "classificationMargins": margins,
+        "minimumClassificationMargin": min(margins, default=1.0),
+        "uncertainPositions": uncertain_positions,
         "correctedTileCount": correction_count,
-        "shanten": shanten,
-        "mode": result.mode,
+        "shanten": None,
+        "mode": "uncertain",
         "recommendations": [],
         "candidates": [],
     }
+
+    if uncertain_positions or correction_count:
+        return payload
+
+    shanten = calculate_shanten(hand_tiles)
+    result: AnalysisResult = core_analyze(hand_tiles)
+    payload["shanten"] = shanten
+    payload["mode"] = result.mode
 
     if result.mode == "draw":
         payload["effectiveDraws"] = _effective_payload(result.effective_draws)
@@ -487,10 +506,16 @@ def analyze_capture(
             )
 
         minimum_confidence = float(payload.get("minimumConfidence", 0.0))
+        minimum_margin = float(payload.get("minimumClassificationMargin", 1.0))
         corrected_count = int(payload.get("correctedTileCount", 0))
-        if minimum_confidence < 0.62 or corrected_count:
+        if (
+            minimum_confidence < MINIMUM_RECOGNITION_CONFIDENCE
+            or minimum_margin < MINIMUM_CLASSIFICATION_MARGIN
+            or corrected_count
+        ):
             reason = (
-                f"最低置信度 {minimum_confidence:.2f}，自动修正 {corrected_count} 张"
+                f"最低置信度 {minimum_confidence:.2f}，最小区分度 {minimum_margin:.3f}，"
+                f"自动修正 {corrected_count} 张"
             )
             saved = save_diagnostic_frame(
                 frame,

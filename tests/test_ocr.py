@@ -149,7 +149,10 @@ class OCRTests(unittest.TestCase):
             success, encoded = cv2.imencode(".png", sample)
             self.assertTrue(success)
             (source / "八筒.png").write_bytes(encoded.tobytes())
-            (source / "八筒_2.png").write_bytes(encoded.tobytes())
+            second_sample = cv2.convertScaleAbs(sample, alpha=0.96, beta=4)
+            second_success, second_encoded = cv2.imencode(".png", second_sample)
+            self.assertTrue(second_success)
+            (source / "八筒_2.png").write_bytes(second_encoded.tobytes())
 
             result_dir, sample_count, tile_count = import_labeled_template_folder(
                 source, output
@@ -159,6 +162,33 @@ class OCRTests(unittest.TestCase):
             self.assertEqual(tile_count, 1)
             self.assertTrue((result_dir / "Pin8.png").is_file())
             self.assertEqual(len(list(result_dir.glob("Pin8_样本*.png"))), 1)
+
+    def test_reimporting_identical_sample_does_not_duplicate_it(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "samples"
+            output = Path(directory) / "templates"
+            source.mkdir()
+            sample = self._load_tile(cv2, np, "Pin9.png", 60, 88)
+            self.assertTrue(cv2.imwrite(str(source / "九筒.png"), sample))
+
+            _, first_imported, first_tiles = import_labeled_template_folder(
+                source, output
+            )
+            first_files = sorted(path.name for path in output.glob("*.png"))
+            _, second_imported, second_tiles = import_labeled_template_folder(
+                source, output
+            )
+            second_files = sorted(path.name for path in output.glob("*.png"))
+
+            self.assertEqual((first_imported, first_tiles), (1, 1))
+            self.assertEqual((second_imported, second_tiles), (0, 1))
+            self.assertEqual(second_files, first_files)
 
     def test_initializes_four_directions_and_reuses_disk_cache(self) -> None:
         try:
@@ -260,6 +290,76 @@ class OCRTests(unittest.TestCase):
             result.tiles,
             ["6p", "7p", "4s", "4s", "6s", "7s", "8s", "4z"],
         )
+
+    def test_auto_detects_fourteen_tiles_with_a_gap_before_the_drawn_tile(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        filenames = [
+            "Man4.png",
+            "Man4.png",
+            "Man5.png",
+            "Man9.png",
+            "Pin2.png",
+            "Pin3.png",
+            "Pin7.png",
+            "Pin7.png",
+            "Pin7.png",
+            "Pin8.png",
+            "Pin9.png",
+            "Sou4.png",
+            "Sou6.png",
+            "Man2.png",
+        ]
+        expected = [
+            "4m",
+            "4m",
+            "5m",
+            "9m",
+            "2p",
+            "3p",
+            "7p",
+            "7p",
+            "7p",
+            "8p",
+            "9p",
+            "4s",
+            "6s",
+            "2m",
+        ]
+        tile_width, tile_height, gap, drawn_gap = 86, 136, 3, 31
+        canvas = np.full(
+            (
+                tile_height + 24,
+                len(filenames) * (tile_width + gap) + gap + drawn_gap,
+                3,
+            ),
+            (80, 105, 100),
+            dtype=np.uint8,
+        )
+        for index, filename in enumerate(filenames):
+            tile = self._load_tile(cv2, np, filename, tile_width, tile_height)
+            left = gap + index * (tile_width + gap)
+            if index == len(filenames) - 1:
+                left += drawn_gap
+            canvas[12 : 12 + tile_height, left : left + tile_width] = tile
+            cv2.rectangle(
+                canvas,
+                (left, 12),
+                (left + tile_width - 1, 12 + tile_height - 1),
+                (35, 45, 50),
+                1,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "draw-gap-hand.png"
+            self.assertTrue(cv2.imwrite(str(image_path), canvas))
+            result = recognize_hand_image(image_path)
+
+        self.assertEqual(result.tiles, expected)
 
 
 if __name__ == "__main__":

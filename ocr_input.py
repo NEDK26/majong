@@ -44,6 +44,8 @@ def _mahjong_soul_template_dir() -> Path:
 DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR = _mahjong_soul_template_dir()
 SUPPORTED_HAND_SIZES = (1, 2, 4, 5, 7, 8, 10, 11, 13, 14)
 AUTO_DETECT_HAND_SIZES = (7, 8, 10, 11, 13, 14)
+MINIMUM_RECOGNITION_CONFIDENCE = 0.62
+MINIMUM_CLASSIFICATION_MARGIN = 0.03
 
 
 class OCRError(HandValidationError):
@@ -59,6 +61,20 @@ class TileRecognition:
     alternatives: tuple[tuple[str, float], ...]
     box: tuple[int, int, int, int]
     match_score: float = 0.0
+
+    @property
+    def classification_margin(self) -> float:
+        """第一名与第二名的匹配分差；无候选的测试/外部结果视为已确认。"""
+        if self.match_score <= 0.0 or not self.alternatives:
+            return 1.0
+        return max(0.0, self.match_score - float(self.alternatives[0][1]))
+
+    @property
+    def is_reliable(self) -> bool:
+        return (
+            self.confidence >= MINIMUM_RECOGNITION_CONFIDENCE
+            and self.classification_margin >= MINIMUM_CLASSIFICATION_MARGIN
+        )
 
 
 @dataclass(frozen=True)
@@ -97,7 +113,7 @@ _TEMPLATE_FILES: dict[str, str] = {
 }
 TemplateDescriptor = tuple[str, Any, Any, float, str]
 _TEMPLATE_CACHE: dict[str, list[TemplateDescriptor]] = {}
-_DESCRIPTOR_CACHE_VERSION = "four-directions-v1"
+_DESCRIPTOR_CACHE_VERSION = "four-directions-v2-deduplicated"
 _CANONICAL_STEM_BY_TILE = {
     tile: Path(filename).stem
     for filename, tile in _TEMPLATE_FILES.items()
@@ -304,6 +320,7 @@ def _template_descriptors(
     descriptors: list[TemplateDescriptor] = []
     missing: list[str] = []
     prepared_tiles: set[str] = set()
+    seen_samples_by_tile: dict[str, set[str]] = {}
     for filename, tile in _TEMPLATE_FILES.items():
         path = template_dir / filename
         if not path.is_file():
@@ -320,6 +337,15 @@ def _template_descriptors(
             image = _read_image(sample_path, cv2.IMREAD_UNCHANGED, cv2, np)
             if image is None:
                 raise OCRError(f"无法读取 OCR 模板：{sample_path}")
+            sample_digest = hashlib.sha256()
+            sample_digest.update(str(image.shape).encode("ascii"))
+            sample_digest.update(str(image.dtype).encode("ascii"))
+            sample_digest.update(image.tobytes())
+            digest = sample_digest.hexdigest()
+            seen_samples = seen_samples_by_tile.setdefault(tile, set())
+            if digest in seen_samples:
+                continue
+            seen_samples.add(digest)
             variants = (
                 image,
                 cv2.rotate(image, cv2.ROTATE_180),
@@ -396,6 +422,29 @@ def import_labeled_template_folder(
             continue
         stem = _CANONICAL_STEM_BY_TILE[tile]
         base_target = destination / f"{stem}.png"
+        existing_paths = [base_target]
+        existing_paths.extend(
+            candidate
+            for candidate in sorted(destination.glob(f"{stem}_样本*"))
+            if candidate.suffix.lower() in _IMAGE_EXTENSIONS
+        )
+        duplicate = False
+        for existing_path in existing_paths:
+            if not existing_path.is_file():
+                continue
+            existing_image = _read_image(
+                existing_path, cv2.IMREAD_UNCHANGED, cv2, np
+            )
+            if (
+                existing_image is not None
+                and existing_image.shape == image.shape
+                and np.array_equal(existing_image, image)
+            ):
+                duplicate = True
+                break
+        covered_tiles.add(tile)
+        if duplicate:
+            continue
         if not base_target.exists():
             target = base_target
         else:
@@ -409,9 +458,8 @@ def import_labeled_template_folder(
         if not _write_image(target, image, cv2):
             raise OCRError(f"无法保存逐张样本：{target}")
         imported += 1
-        covered_tiles.add(tile)
 
-    if imported == 0:
+    if not covered_tiles:
         raise OCRError(
             "没有找到已标注样本。请使用“八筒.png、六索_2.png、北.png”"
             "这样的中文文件名。"
@@ -590,6 +638,12 @@ def _layout_regularity(boxes: list[tuple[int, int, int, int]], np: Any) -> float
     centers_y = np.array([box[1] + box[3] / 2 for box in boxes], dtype=np.float32)
     lefts = np.array([box[0] for box in boxes], dtype=np.float32)
     steps = np.diff(lefts)
+    # 雀魂把刚摸入的最右一张与原手牌留出小间隔；这仍属于同一行，不能因为
+    # 唯一的末尾间隔而把完整 14 张候选降到短子窗口之后。
+    if len(steps) >= 2:
+        median_step = float(np.median(steps[:-1]))
+        if median_step * 1.12 <= float(steps[-1]) <= median_step * 1.65:
+            steps = steps[:-1]
 
     penalties = [
         float(widths.std() / max(1.0, widths.mean())),
@@ -634,7 +688,9 @@ def _contour_layouts(
         if signature not in signatures:
             signatures.add(signature)
             unique.append((boxes_in_layout, score))
-    return unique[:12]
+    # 后续会按张数分别做 shortlist；这里不能全局截断，否则大量高规整度的
+    # 7 张子窗口会把真实的 13/14 张完整手牌候选挤掉。
+    return unique
 
 
 def _inferred_grid_layouts(
@@ -707,7 +763,15 @@ def _inferred_grid_layouts(
                 regularity = _layout_regularity(predicted, np)
                 layouts.append((predicted, anchor_coverage * 0.7 + regularity * 0.3))
 
-    return sorted(layouts, key=lambda item: item[1], reverse=True)[:16]
+    # 每种合法张数都保留候选，避免短窗口在这里提前挤掉完整手牌。
+    ranked_by_count: dict[
+        int, list[tuple[list[tuple[int, int, int, int]], float]]
+    ] = {}
+    for candidate in sorted(layouts, key=lambda item: item[1], reverse=True):
+        bucket = ranked_by_count.setdefault(len(candidate[0]), [])
+        if len(bucket) < 4:
+            bucket.append(candidate)
+    return [candidate for bucket in ranked_by_count.values() for candidate in bucket]
 
 
 def _uniform_layout(
@@ -752,13 +816,19 @@ def _shortlist_layouts(
             (geometry_score, boxes, regularity)
         )
 
-    finalists = [
-        candidate
-        for candidates in candidates_by_count.values()
-        for candidate in sorted(candidates, key=lambda item: item[0], reverse=True)[:2]
-    ]
-    finalists.sort(key=lambda item: item[0], reverse=True)
-    return [(boxes, regularity) for _, boxes, regularity in finalists[:8]]
+    ranked_by_count = {
+        count: sorted(candidates, key=lambda item: item[0], reverse=True)[:2]
+        for count, candidates in candidates_by_count.items()
+    }
+    # 至少让每种张数的最优候选进入昂贵的分类阶段，再用额外名额补充次优候选。
+    finalists = [candidates[0] for candidates in ranked_by_count.values()]
+    extras = sorted(
+        (candidate for candidates in ranked_by_count.values() for candidate in candidates[1:]),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    finalists.extend(extras[: max(0, 12 - len(finalists))])
+    return [(boxes, regularity) for _, boxes, regularity in finalists]
 
 
 def _similarity(
@@ -875,11 +945,13 @@ def _recognize_hand_array(
             len(boxes) * image.shape[0]
         )
         count_preference = min(1.0, len(boxes) / 14.0)
+        # 完整张数和几何一致性应优先于单张平均置信度；否则一张较难识别的
+        # 摸入牌会让 13 张甚至 7 张的高置信度子窗口胜出。
         layout_score = (
-            average_confidence * 0.68
-            + regularity * 0.12
-            + bottomness * 0.14
-            + count_preference * 0.06
+            average_confidence * 0.62
+            + regularity * 0.16
+            + bottomness * 0.12
+            + count_preference * 0.10
         )
         if best_result is None or layout_score > best_result[0]:
             best_result = layout_score, recognitions

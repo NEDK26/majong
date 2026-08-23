@@ -8,7 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from diagnostics import diagnostics_directory, log_event, log_exception
+from diagnostics import (
+    diagnostics_directory,
+    log_event,
+    log_exception,
+    recognition_details,
+)
+from ocr_input import TileRecognition
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -41,6 +47,22 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(record["错误类型"], "RuntimeError")
         self.assertEqual(record["错误信息"], "测试异常")
         self.assertIn("RuntimeError", record["调用栈"])
+
+    def test_recognition_details_include_best_score_and_margin(self) -> None:
+        details = recognition_details(
+            [
+                TileRecognition(
+                    tile="2m",
+                    confidence=0.71,
+                    alternatives=(("9m", 0.74),),
+                    box=(1, 2, 3, 4),
+                    match_score=0.75,
+                )
+            ]
+        )
+
+        self.assertEqual(details[0]["匹配分"], 0.75)
+        self.assertEqual(details[0]["区分度"], 0.01)
 
 
 if __name__ == "__main__":

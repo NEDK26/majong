@@ -5,6 +5,44 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+
+
+@dataclass
+class AnalysisStabilizer:
+    """只在张数/状态连续出现后接受变化，避免单帧 OCR 抖动覆盖界面。"""
+
+    required_hits: int = 2
+    accepted_signature: tuple[int, str] | None = None
+    pending_signature: tuple[int, str] | None = None
+    pending_hits: int = 0
+
+    def reset(self) -> None:
+        self.accepted_signature = None
+        self.pending_signature = None
+        self.pending_hits = 0
+
+    def should_accept(self, signature: tuple[int, str]) -> bool:
+        if signature == self.accepted_signature:
+            self.pending_signature = None
+            self.pending_hits = 0
+            return True
+        if signature != self.pending_signature:
+            self.pending_signature = signature
+            self.pending_hits = 1
+            if self.required_hits <= 1:
+                self.accepted_signature = signature
+                self.pending_signature = None
+                self.pending_hits = 0
+                return True
+            return False
+        self.pending_hits += 1
+        if self.pending_hits < self.required_hits:
+            return False
+        self.accepted_signature = signature
+        self.pending_signature = None
+        self.pending_hits = 0
+        return True
 
 
 def fit_preview_size(
