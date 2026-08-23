@@ -15,6 +15,7 @@ ocr-debug*.png
 local_ocr_samples/
 local_ocr_templates/
 local_settings.json
+local_diagnostics/
 **/.ocr_features.npz
 extracted_mahjong_tiles/
 extracted_mahjong_tiles.zip

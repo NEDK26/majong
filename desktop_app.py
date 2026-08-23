@@ -19,6 +19,7 @@ from tkinter import filedialog, ttk
 from typing import Any, Callable
 
 from desktop_utils import friendly_error_message, shanten_label
+from diagnostics import diagnostics_directory, log_event, log_exception
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     build_mahjong_soul_templates,
@@ -79,6 +80,7 @@ class CompactOverlayApp:
         self.selector_rect: int | None = None
         # DXGI/COM 对象固定在同一个工作线程中创建和使用，避免跨线程失效。
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="capture")
+        log_event("牌理镜启动", 是否打包版=bool(getattr(sys, "frozen", False)))
 
         self.status_var = tk.StringVar(value="正在读取显示器")
         self.main_var = tk.StringVar(value="牌理镜正在准备…")
@@ -229,6 +231,7 @@ class CompactOverlayApp:
             self._show_error(RuntimeError("没有检测到可用显示器。"))
             return
         self.monitors = monitors
+        log_event("显示器读取完成", 显示器列表=monitors)
         preferred_monitor_id = self.monitor_id
         selected_monitor = next(
             (
@@ -382,6 +385,12 @@ class CompactOverlayApp:
     def _show_template_initialization_progress(
         self, tile: str, current: int, total: int
     ) -> None:
+        log_event(
+            "OCR模板初始化进度",
+            牌=tile_name_to_chinese(tile),
+            当前=current,
+            总数=total,
+        )
         self.status_var.set(f"初始化 {current}/{total}")
         self.main_var.set(
             f"{tile_name_to_chinese(tile)}已识别（{current}/{total}）"
@@ -390,6 +399,11 @@ class CompactOverlayApp:
 
     def _template_initialization_done(self, result: tuple[int, int]) -> None:
         tile_count, descriptor_count = result
+        log_event(
+            "OCR模板初始化完成",
+            牌种数量=tile_count,
+            方向特征数量=descriptor_count,
+        )
         self.initializing_templates = False
         self.templates_ready = True
         self.status_var.set("初始化完成")
@@ -398,6 +412,7 @@ class CompactOverlayApp:
         self.start()
 
     def _template_initialization_failed(self, exc: Exception) -> None:
+        log_exception("OCR模板初始化失败", exc)
         self.initializing_templates = False
         self.templates_ready = False
         self.pause_button.configure(text="重试")
@@ -504,6 +519,7 @@ class CompactOverlayApp:
 
     def _analysis_failed(self, exc: Exception) -> None:
         self.analysis_inflight = False
+        log_exception("界面收到实时分析错误", exc)
         self.status_var.set("需要调整")
         self.main_var.set(friendly_error_message(exc))
         self.meta_var.set("若能看到游戏但识别失败，请点击“框选”并只圈暗牌")
@@ -524,7 +540,7 @@ class CompactOverlayApp:
         window.resizable(False, False)
         window.attributes("-topmost", True)
         window.protocol("WM_DELETE_WINDOW", self.toggle_settings)
-        width, height = 360, 372
+        width, height = 360, 414
         left = max(8, self.root.winfo_x() + self.root.winfo_width() - width)
         top = self.root.winfo_y() + self.root.winfo_height() + 6
         window.geometry(f"{width}x{height}+{left}+{top}")
@@ -595,6 +611,13 @@ class CompactOverlayApp:
             self.import_labeled_samples,
             secondary=True,
         ).pack(fill="x", pady=(10, 0))
+
+        self._settings_button(
+            body,
+            "打开诊断文件夹",
+            self.open_diagnostics_folder,
+            secondary=True,
+        ).pack(fill="x", pady=(8, 0))
 
         tk.Label(
             body,
@@ -673,6 +696,13 @@ class CompactOverlayApp:
         self.interval_ms = {"0.5 秒": 500, "1 秒": 1000, "1.5 秒": 1500}.get(
             self.interval_var.get(), 500
         )
+        log_event(
+            "设置已更新",
+            显示器=self.monitor_id,
+            捕获方式=self.backend,
+            暗牌张数=self.expected_count,
+            刷新间隔毫秒=self.interval_ms,
+        )
         self._save_preferences()
         if self.running:
             self._schedule_analysis(100)
@@ -694,6 +724,7 @@ class CompactOverlayApp:
         )
 
     def _calibration_done(self, _: Any) -> None:
+        log_event("总览图校准完成")
         self.templates_ready = False
         self.status_var.set("校准完成")
         self.main_var.set("牌面模板已保存，可以开始读取游戏画面")
@@ -718,12 +749,26 @@ class CompactOverlayApp:
     def _sample_import_done(self, result: tuple[Path, int, int]) -> None:
         self.templates_ready = False
         _, sample_count, tile_count = result
+        log_event("拆分牌样本导入完成", 样本数量=sample_count, 覆盖牌种=tile_count)
         self.status_var.set("样本已导入")
         self.main_var.set(
             f"已导入 {sample_count} 张样本，覆盖 {tile_count} 种牌"
         )
         self.meta_var.set("样本只保存在本机，不会上传；正在重新识别")
         self.start()
+
+    def open_diagnostics_folder(self) -> None:
+        path = diagnostics_directory()
+        log_event("用户打开诊断文件夹", 路径=str(path))
+        try:
+            if os.name == "nt":
+                getattr(os, "startfile")(str(path))
+            else:
+                self.status_var.set("诊断目录")
+                self.main_var.set(str(path))
+                self.meta_var.set("Windows 版会直接打开此文件夹")
+        except Exception as exc:
+            self._show_error(exc)
 
     def select_region(self) -> None:
         if self.settings_window is not None and self.settings_window.winfo_exists():
@@ -821,6 +866,7 @@ class CompactOverlayApp:
                 canvas.itemconfigure(self.selector_rect, outline=COLORS["red"])
             return
         self.region = {"x": left, "y": top, "width": width, "height": height}
+        log_event("手牌区域已框选", 区域=self.region, 显示器=self.monitor_id)
         self._save_preferences()
         self._close_selector(False)
         self.status_var.set("框选完成")
@@ -848,6 +894,7 @@ class CompactOverlayApp:
 
     def _show_error(self, exc: Exception) -> None:
         self.analysis_inflight = False
+        log_exception("界面操作失败", exc)
         self.status_var.set("操作失败")
         self.main_var.set(friendly_error_message(exc))
         self.meta_var.set("点击“设置”切换捕获方式，或确认游戏与本程序权限一致")
@@ -876,6 +923,7 @@ class CompactOverlayApp:
 
     def close(self) -> None:
         self.running = False
+        log_event("牌理镜关闭")
         self._save_preferences()
         if self.timer_id:
             self.root.after_cancel(self.timer_id)

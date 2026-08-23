@@ -16,6 +16,12 @@ from dataclasses import replace
 from typing import Any
 
 from analyzer import AnalysisResult, calculate_shanten, core_analyze
+from diagnostics import (
+    log_event,
+    log_exception,
+    recognition_details,
+    save_diagnostic_frame,
+)
 from input_layer import hand_input
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
@@ -33,6 +39,8 @@ class ScreenCaptureError(RuntimeError):
 
 CAPTURE_BACKENDS = ("auto", "dxgi", "mss")
 _DXGI_CAMERAS: dict[tuple[int, int], Any] = {}
+_LAST_DIAGNOSTIC_SIGNATURE: tuple[Any, ...] | None = None
+_LAST_DIAGNOSTIC_AT = 0.0
 
 
 def _screen_modules() -> tuple[Any, Any, Any]:
@@ -410,30 +418,104 @@ def analyze_capture(
     monitor_geometry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """捕获一次框选区域并返回 OCR + 牌理分析结果。"""
-    frame, capture_region = capture_screen(
-        monitor_id,
-        region,
-        backend,
-        monitor_geometry=monitor_geometry,
-    )
-    template_dir = (
-        DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR
-        if DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR.is_dir()
-        else DEFAULT_TEMPLATE_DIR
-    )
-    ocr_result = recognize_hand_frame(
-        frame,
-        expected_count=expected_count,
-        template_dir=template_dir,
-    )
-    payload = analysis_payload(ocr_result)
-    payload.update(
-        {
-            "capturedAt": time.strftime("%H:%M:%S"),
-            "captureRegion": capture_region,
-            "template": "mahjong_soul"
-            if template_dir == DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR
-            else "default",
-        }
-    )
-    return payload
+    global _LAST_DIAGNOSTIC_AT, _LAST_DIAGNOSTIC_SIGNATURE
+    started = time.perf_counter()
+    frame: Any | None = None
+    capture_region: dict[str, Any] = {}
+    try:
+        capture_started = time.perf_counter()
+        frame, capture_region = capture_screen(
+            monitor_id,
+            region,
+            backend,
+            monitor_geometry=monitor_geometry,
+        )
+        capture_ms = round((time.perf_counter() - capture_started) * 1000, 1)
+        template_dir = (
+            DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR
+            if DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR.is_dir()
+            else DEFAULT_TEMPLATE_DIR
+        )
+        ocr_started = time.perf_counter()
+        ocr_result = recognize_hand_frame(
+            frame,
+            expected_count=expected_count,
+            template_dir=template_dir,
+        )
+        ocr_ms = round((time.perf_counter() - ocr_started) * 1000, 1)
+        payload = analysis_payload(ocr_result)
+        total_ms = round((time.perf_counter() - started) * 1000, 1)
+        payload.update(
+            {
+                "capturedAt": time.strftime("%H:%M:%S"),
+                "captureRegion": capture_region,
+                "template": "mahjong_soul"
+                if template_dir == DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR
+                else "default",
+                "timings": {
+                    "captureMs": capture_ms,
+                    "ocrMs": ocr_ms,
+                    "totalMs": total_ms,
+                },
+            }
+        )
+
+        signature = (
+            tuple(payload.get("tiles", [])),
+            payload.get("mode"),
+            capture_region.get("backend"),
+            payload.get("correctedTileCount", 0),
+        )
+        now = time.monotonic()
+        if signature != _LAST_DIAGNOSTIC_SIGNATURE or now - _LAST_DIAGNOSTIC_AT >= 5.0:
+            _LAST_DIAGNOSTIC_SIGNATURE = signature
+            _LAST_DIAGNOSTIC_AT = now
+            log_event(
+                "实时分析完成",
+                捕获方式=capture_region.get("backend"),
+                显示器=monitor_id,
+                框选区域=capture_region,
+                指定暗牌张数=expected_count,
+                识别张数=len(payload.get("tiles", [])),
+                识别详情=recognition_details(ocr_result.recognitions),
+                自动修正张数=payload.get("correctedTileCount", 0),
+                分析状态=payload.get("mode"),
+                推荐舍牌=payload.get("recommendations", []),
+                捕获耗时毫秒=capture_ms,
+                OCR耗时毫秒=ocr_ms,
+                总耗时毫秒=total_ms,
+            )
+
+        minimum_confidence = float(payload.get("minimumConfidence", 0.0))
+        corrected_count = int(payload.get("correctedTileCount", 0))
+        if minimum_confidence < 0.62 or corrected_count:
+            reason = (
+                f"最低置信度 {minimum_confidence:.2f}，自动修正 {corrected_count} 张"
+            )
+            saved = save_diagnostic_frame(
+                frame,
+                reason=reason,
+                recognitions=ocr_result.recognitions,
+            )
+            if saved is not None:
+                log_event("已保存低置信度诊断画面", 文件=str(saved), 原因=reason)
+        return payload
+    except Exception as exc:
+        total_ms = round((time.perf_counter() - started) * 1000, 1)
+        log_exception(
+            "实时分析失败",
+            exc,
+            显示器=monitor_id,
+            请求框选区域=region,
+            实际框选区域=capture_region,
+            捕获方式=backend,
+            指定暗牌张数=expected_count,
+            已耗时毫秒=total_ms,
+        )
+        if frame is not None:
+            save_diagnostic_frame(
+                frame,
+                reason=f"分析异常：{type(exc).__name__}: {exc}",
+                minimum_interval=4.0,
+            )
+        raise

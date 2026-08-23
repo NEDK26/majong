@@ -10,6 +10,7 @@ import sys
 
 from analyzer import calculate_shanten, core_analyze
 from desktop_utils import friendly_error_message
+from diagnostics import log_exception
 from input_layer import hand_input
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
@@ -268,6 +269,7 @@ def main() -> None:
         else:
             run_interactive()
     except (HandValidationError, ValueError, RuntimeError) as exc:
+        log_exception("程序主流程失败", exc)
         if args.smoke_test:
             raise SystemExit(1) from exc
         if is_frozen_app():
@@ -277,6 +279,7 @@ def main() -> None:
             return
         raise SystemExit(f"错误：{exc}") from exc
     except Exception as exc:
+        log_exception("程序发生未处理异常", exc)
         if args.smoke_test:
             raise SystemExit(1) from exc
         if is_frozen_app():
