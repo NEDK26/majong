@@ -23,6 +23,7 @@ from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     build_mahjong_soul_templates,
     import_labeled_template_folder,
+    prepare_ocr_templates,
 )
 from screen_capture import (
     analyze_capture,
@@ -67,6 +68,8 @@ class CompactOverlayApp:
         self.interval_ms = 500
         self.running = False
         self.analysis_inflight = False
+        self.templates_ready = False
+        self.initializing_templates = False
         self.timer_id: str | None = None
         self.settings_window: tk.Toplevel | None = None
         self.selector_window: tk.Toplevel | None = None
@@ -339,12 +342,66 @@ class CompactOverlayApp:
             self.running = False
             self.pause_button.configure(text="开始")
             self.status_var.set("等待校准")
-            self.main_var.set("首次使用：点击“设置”→“校准雀魂牌面”")
-            self.meta_var.set("选择你提供的 34 种牌总览图；只需校准一次")
+            self.main_var.set("首次使用：设置 → 导入拆分好的 34 张牌")
+            self.meta_var.set("也可以选择 34 种牌总览图，由程序自动拆分")
+            return
+        if not self.templates_ready:
+            if self.initializing_templates:
+                return
+            self.initializing_templates = True
+            self.running = False
+            self.pause_button.configure(text="准备中")
+            self.status_var.set("OCR 初始化")
+            self.main_var.set("正在预加载 34 种牌…")
+            self.meta_var.set("每种牌会提前生成正、倒、左横、右横四方向特征")
+            self._run_worker(
+                lambda: prepare_ocr_templates(
+                    progress=self._template_initialization_progress
+                ),
+                self._template_initialization_done,
+                self._template_initialization_failed,
+            )
             return
         self.running = True
         self.pause_button.configure(text="暂停")
         self._schedule_analysis(80)
+
+    def _template_initialization_progress(
+        self, tile: str, current: int, total: int
+    ) -> None:
+        try:
+            self.root.after(
+                0,
+                lambda: self._show_template_initialization_progress(
+                    tile, current, total
+                ),
+            )
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _show_template_initialization_progress(
+        self, tile: str, current: int, total: int
+    ) -> None:
+        self.status_var.set(f"初始化 {current}/{total}")
+        self.main_var.set(
+            f"{tile_name_to_chinese(tile)}已识别（{current}/{total}）"
+        )
+        self.meta_var.set("正在生成四方向特征并写入本机缓存…")
+
+    def _template_initialization_done(self, result: tuple[int, int]) -> None:
+        tile_count, descriptor_count = result
+        self.initializing_templates = False
+        self.templates_ready = True
+        self.status_var.set("初始化完成")
+        self.main_var.set(f"{tile_count} 种牌已准备完成")
+        self.meta_var.set(f"已缓存 {descriptor_count} 组方向特征，开始读取画面")
+        self.start()
+
+    def _template_initialization_failed(self, exc: Exception) -> None:
+        self.initializing_templates = False
+        self.templates_ready = False
+        self.pause_button.configure(text="重试")
+        self._show_error(exc)
 
     def stop(self) -> None:
         self.running = False
@@ -398,8 +455,11 @@ class CompactOverlayApp:
         backend = capture.get("backend", "屏幕")
         confidence = float(data.get("minimumConfidence", 0.0))
         recognized_count = len(data.get("tiles", []))
+        corrected_count = int(data.get("correctedTileCount", 0))
+        correction_label = f" · 修正{corrected_count}张" if corrected_count else ""
         self.status_var.set(
             f"{backend} · {recognized_count}张 · {confidence * 100:.0f}%"
+            f"{correction_label}"
         )
 
         recommendations = list(data.get("recommendations", []))
@@ -531,7 +591,7 @@ class CompactOverlayApp:
 
         self._settings_button(
             body,
-            "导入逐张实战样本（提高准确率）",
+            "导入拆分好的牌 / 实战样本",
             self.import_labeled_samples,
             secondary=True,
         ).pack(fill="x", pady=(10, 0))
@@ -634,6 +694,7 @@ class CompactOverlayApp:
         )
 
     def _calibration_done(self, _: Any) -> None:
+        self.templates_ready = False
         self.status_var.set("校准完成")
         self.main_var.set("牌面模板已保存，可以开始读取游戏画面")
         self.meta_var.set("下一步点击“框选”，只圈住自己的暗牌")
@@ -642,7 +703,7 @@ class CompactOverlayApp:
     def import_labeled_samples(self) -> None:
         path = filedialog.askdirectory(
             parent=self.settings_window or self.root,
-            title="选择逐张牌样本文件夹（例如：八筒.png、北.png）",
+            title="选择拆分牌文件夹（例如：一万.png、八筒.png、北.png）",
         )
         if not path:
             return
@@ -655,6 +716,7 @@ class CompactOverlayApp:
         )
 
     def _sample_import_done(self, result: tuple[Path, int, int]) -> None:
+        self.templates_ready = False
         _, sample_count, tile_count = result
         self.status_var.set("样本已导入")
         self.main_var.set(

@@ -12,6 +12,7 @@ from screen_capture import (
     _capture_with_dxgi,
     ScreenCaptureError,
     _dxgi_output_for_monitor,
+    _legalize_recognized_tiles,
     analysis_payload,
     analyze_capture,
     capture_screen,
@@ -42,6 +43,26 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertEqual(payload["tiles"], ["6p", "7p", "4s", "4s", "6s", "7s", "8s", "4z"])
         self.assertEqual(payload["shanten"], 0)
         self.assertEqual(payload["recommendations"], ["4z"])
+
+    def test_duplicate_ocr_tiles_are_corrected_before_hand_validation(self) -> None:
+        recognitions = []
+        for index in range(5):
+            recognitions.append(
+                TileRecognition(
+                    tile="8p",
+                    confidence=0.90 if index < 4 else 0.55,
+                    alternatives=(("7p", 0.80),),
+                    box=(index * 40, 0, 40, 60),
+                    match_score=0.90 if index < 4 else 0.56,
+                )
+            )
+        result, correction_count = _legalize_recognized_tiles(
+            OCRResult(image_path=None, recognitions=tuple(recognitions))
+        )
+
+        self.assertEqual(correction_count, 1)
+        self.assertEqual(result.tiles.count("8p"), 4)
+        self.assertEqual(result.tiles.count("7p"), 1)
 
     def test_capture_pipeline_does_not_require_a_temporary_image(self) -> None:
         try:

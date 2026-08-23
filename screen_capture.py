@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections import Counter
+from dataclasses import replace
 from typing import Any
 
 from analyzer import AnalysisResult, calculate_shanten, core_analyze
@@ -19,9 +21,10 @@ from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
     DEFAULT_TEMPLATE_DIR,
     OCRResult,
+    TileRecognition,
     recognize_hand_frame,
 )
-from tile_utils import HandValidationError, tiles_from_34
+from tile_utils import HandValidationError, TILE_NAMES, tiles_from_34
 
 
 class ScreenCaptureError(RuntimeError):
@@ -299,8 +302,66 @@ def _effective_payload(items: Any) -> list[dict[str, int | str]]:
     return [{"tile": item.tile, "remaining": item.remaining} for item in items]
 
 
+def _legalize_recognized_tiles(ocr_result: OCRResult) -> tuple[OCRResult, int]:
+    """用次优候选修正单种牌超过四张的明显 OCR 冲突。"""
+    recognitions = list(ocr_result.recognitions)
+    counts = Counter(item.tile for item in recognitions)
+    correction_count = 0
+
+    for duplicated_tile, count in list(counts.items()):
+        excess = count - 4
+        if excess <= 0:
+            continue
+        indexes = sorted(
+            (
+                index
+                for index, item in enumerate(recognitions)
+                if item.tile == duplicated_tile
+            ),
+            key=lambda index: (
+                recognitions[index].match_score,
+                recognitions[index].confidence,
+            ),
+        )
+        for index in indexes[:excess]:
+            current = recognitions[index]
+            replacement = next(
+                (
+                    (tile, score)
+                    for tile, score in current.alternatives
+                    if counts[tile] < 4
+                ),
+                None,
+            )
+            if replacement is None:
+                replacement = next(
+                    ((tile, 0.0) for tile in TILE_NAMES if counts[tile] < 4),
+                    None,
+                )
+            if replacement is None:
+                continue
+            tile, score = replacement
+            counts[current.tile] -= 1
+            counts[tile] += 1
+            remaining_alternatives = tuple(
+                item for item in current.alternatives if item[0] != tile
+            )
+            recognitions[index] = replace(
+                current,
+                tile=tile,
+                confidence=min(current.confidence, max(0.0, float(score))),
+                alternatives=((current.tile, current.match_score),)
+                + remaining_alternatives,
+                match_score=float(score),
+            )
+            correction_count += 1
+
+    return replace(ocr_result, recognitions=tuple(recognitions)), correction_count
+
+
 def analysis_payload(ocr_result: OCRResult) -> dict[str, Any]:
     """把 OCR 结果转换为独立于界面框架的展示数据。"""
+    ocr_result, correction_count = _legalize_recognized_tiles(ocr_result)
     hand_tiles = hand_input(ocr_result.tiles)
     shanten = calculate_shanten(hand_tiles)
     result: AnalysisResult = core_analyze(hand_tiles)
@@ -309,6 +370,7 @@ def analysis_payload(ocr_result: OCRResult) -> dict[str, Any]:
         "sortedTiles": tiles_from_34(hand_tiles),
         "confidences": [round(item.confidence, 4) for item in ocr_result.recognitions],
         "minimumConfidence": round(ocr_result.minimum_confidence, 4),
+        "correctedTileCount": correction_count,
         "shanten": shanten,
         "mode": result.mode,
         "recommendations": [],

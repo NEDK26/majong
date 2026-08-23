@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tile_utils import HandValidationError, TILE_NAMES, tile_name_to_chinese
 
@@ -56,6 +58,7 @@ class TileRecognition:
     confidence: float
     alternatives: tuple[tuple[str, float], ...]
     box: tuple[int, int, int, int]
+    match_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +95,9 @@ _TEMPLATE_FILES: dict[str, str] = {
     "Pin5-Dora.png": "5p",
     "Sou5-Dora.png": "5s",
 }
-_TEMPLATE_CACHE: dict[str, list[tuple[str, Any, Any, float]]] = {}
+TemplateDescriptor = tuple[str, Any, Any, float, str]
+_TEMPLATE_CACHE: dict[str, list[TemplateDescriptor]] = {}
+_DESCRIPTOR_CACHE_VERSION = "four-directions-v1"
 _CANONICAL_STEM_BY_TILE = {
     tile: Path(filename).stem
     for filename, tile in _TEMPLATE_FILES.items()
@@ -218,7 +223,71 @@ def _ink_descriptor(image: Any, cv2: Any, np: Any) -> tuple[Any, Any, float]:
     return glyph, color_vector, foreground_ratio
 
 
-def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[str, Any, Any, float]]:
+def _template_fingerprint(template_dir: Path) -> str:
+    digest = hashlib.sha256(_DESCRIPTOR_CACHE_VERSION.encode("ascii"))
+    for path in sorted(template_dir.glob("*")):
+        if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+            continue
+        stat = path.stat()
+        digest.update(path.name.encode("utf-8"))
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _load_descriptor_cache(
+    template_dir: Path, fingerprint: str, np: Any
+) -> list[TemplateDescriptor] | None:
+    try:
+        raw = (template_dir / ".ocr_features.npz").read_bytes()
+        with np.load(io.BytesIO(raw), allow_pickle=False) as data:
+            if str(data["fingerprint"].item()) != fingerprint:
+                return None
+            return [
+                (str(tile), glyph, color, float(ratio), str(orientation))
+                for tile, glyph, color, ratio, orientation in zip(
+                    data["tiles"].tolist(),
+                    data["glyphs"],
+                    data["colors"],
+                    data["ratios"],
+                    data["orientations"].tolist(),
+                    strict=True,
+                )
+            ]
+    except (OSError, KeyError, ValueError, EOFError):
+        return None
+
+
+def _save_descriptor_cache(
+    template_dir: Path,
+    fingerprint: str,
+    descriptors: list[TemplateDescriptor],
+    np: Any,
+) -> None:
+    if not descriptors:
+        return
+    buffer = io.BytesIO()
+    np.savez_compressed(
+        buffer,
+        fingerprint=np.array(fingerprint),
+        tiles=np.array([item[0] for item in descriptors]),
+        glyphs=np.stack([item[1] for item in descriptors]),
+        colors=np.stack([item[2] for item in descriptors]),
+        ratios=np.array([item[3] for item in descriptors], dtype=np.float32),
+        orientations=np.array([item[4] for item in descriptors]),
+    )
+    try:
+        (template_dir / ".ocr_features.npz").write_bytes(buffer.getvalue())
+    except OSError:
+        pass
+
+
+def _template_descriptors(
+    template_dir: Path,
+    cv2: Any,
+    np: Any,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> list[TemplateDescriptor]:
     if not template_dir.is_dir():
         raise OCRError(f"OCR 模板目录不存在：{template_dir}")
 
@@ -226,12 +295,18 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
     if cache_key in _TEMPLATE_CACHE:
         return _TEMPLATE_CACHE[cache_key]
 
-    descriptors: list[tuple[str, Any, Any, float]] = []
+    fingerprint = _template_fingerprint(template_dir)
+    cached = _load_descriptor_cache(template_dir, fingerprint, np)
+    if cached is not None:
+        _TEMPLATE_CACHE[cache_key] = cached
+        return cached
+
+    descriptors: list[TemplateDescriptor] = []
     missing: list[str] = []
+    prepared_tiles: set[str] = set()
     for filename, tile in _TEMPLATE_FILES.items():
         path = template_dir / filename
         if not path.is_file():
-            # 赤五模板是可选的，基础 34 种牌必须齐全。
             if "-Dora" not in filename:
                 missing.append(filename)
             continue
@@ -245,13 +320,41 @@ def _template_descriptors(template_dir: Path, cv2: Any, np: Any) -> list[tuple[s
             image = _read_image(sample_path, cv2.IMREAD_UNCHANGED, cv2, np)
             if image is None:
                 raise OCRError(f"无法读取 OCR 模板：{sample_path}")
-            glyph, colors, ratio = _ink_descriptor(image, cv2, np)
-            descriptors.append((tile, glyph, colors, ratio))
+            variants = (
+                image,
+                cv2.rotate(image, cv2.ROTATE_180),
+                cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE),
+                cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE),
+            )
+            for variant in variants:
+                glyph, colors, ratio = _ink_descriptor(variant, cv2, np)
+                orientation = (
+                    "竖向" if variant.shape[0] >= variant.shape[1] else "横向"
+                )
+                descriptors.append((tile, glyph, colors, ratio, orientation))
+
+        if "-Dora" not in filename and tile not in prepared_tiles:
+            prepared_tiles.add(tile)
+            if progress is not None:
+                progress(tile, len(prepared_tiles), 34)
 
     if missing:
         raise OCRError("OCR 模板缺失：" + "、".join(missing))
     _TEMPLATE_CACHE[cache_key] = descriptors
+    _save_descriptor_cache(template_dir, fingerprint, descriptors, np)
     return descriptors
+
+
+def prepare_ocr_templates(
+    template_dir: str | Path = DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> tuple[int, int]:
+    """初始化并持久缓存34种牌的四方向特征。"""
+    cv2, np = _cv_modules()
+    descriptors = _template_descriptors(
+        Path(template_dir).expanduser().resolve(), cv2, np, progress
+    )
+    return len({item[0] for item in descriptors}), len(descriptors)
 
 
 def _tile_from_sample_filename(path: Path) -> str | None:
@@ -292,13 +395,17 @@ def import_labeled_template_folder(
         if image is None or getattr(image, "size", 0) == 0:
             continue
         stem = _CANONICAL_STEM_BY_TILE[tile]
-        counters[stem] = counters.get(stem, 0) + 1
-        sample_number = counters[stem]
-        target = destination / f"{stem}_样本{sample_number:03d}.png"
-        while target.exists():
-            sample_number += 1
+        base_target = destination / f"{stem}.png"
+        if not base_target.exists():
+            target = base_target
+        else:
+            counters[stem] = counters.get(stem, 0) + 1
+            sample_number = counters[stem]
             target = destination / f"{stem}_样本{sample_number:03d}.png"
-        counters[stem] = sample_number
+            while target.exists():
+                sample_number += 1
+                target = destination / f"{stem}_样本{sample_number:03d}.png"
+            counters[stem] = sample_number
         if not _write_image(target, image, cv2):
             raise OCRError(f"无法保存逐张样本：{target}")
         imported += 1
@@ -362,9 +469,16 @@ def _detected_boxes(image: Any, cv2: Any, np: Any) -> list[tuple[int, int, int, 
         for contour in contours:
             x, y, box_width, box_height = cv2.boundingRect(contour)
             aspect = box_width / box_height if box_height else 0.0
-            if box_height < max(28, height * 0.055):
+            is_vertical = 0.46 <= aspect <= 0.92
+            is_horizontal = 1.08 <= aspect <= 2.20
+            if box_height > height * 0.98 or not (is_vertical or is_horizontal):
                 continue
-            if box_height > height * 0.98 or not 0.46 <= aspect <= 0.92:
+            minimum_height = (
+                max(28, height * 0.055)
+                if is_vertical
+                else max(18, height * 0.035)
+            )
+            if box_height < minimum_height:
                 continue
             if box_width * box_height < width * height * 0.0006:
                 continue
@@ -679,13 +793,16 @@ def _similarity(
 def _classify_tile(
     crop: Any,
     box: tuple[int, int, int, int],
-    templates: list[tuple[str, Any, Any, float]],
+    templates: list[TemplateDescriptor],
     cv2: Any,
     np: Any,
 ) -> TileRecognition:
     query_glyph, query_colors, query_ratio = _ink_descriptor(crop, cv2, np)
+    query_orientation = "竖向" if crop.shape[0] >= crop.shape[1] else "横向"
     best_by_tile: dict[str, float] = {}
-    for tile, glyph, colors, ratio in templates:
+    for tile, glyph, colors, ratio, orientation in templates:
+        if orientation != query_orientation:
+            continue
         score = _similarity(
             query_glyph,
             query_colors,
@@ -707,8 +824,9 @@ def _classify_tile(
     return TileRecognition(
         tile=best_tile,
         confidence=confidence,
-        alternatives=tuple(ranking[1:4]),
+        alternatives=tuple(ranking[1:9]),
         box=box,
+        match_score=best_score,
     )
 
 

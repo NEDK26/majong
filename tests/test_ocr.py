@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import shutil
 from unittest.mock import patch
 from pathlib import Path
 
 from ocr_input import (
     DEFAULT_TEMPLATE_DIR,
+    _TEMPLATE_CACHE,
+    _TEMPLATE_FILES,
     _mahjong_soul_template_dir,
     build_mahjong_soul_templates,
     import_labeled_template_folder,
+    prepare_ocr_templates,
     recognize_hand_image,
 )
 
@@ -153,7 +157,60 @@ class OCRTests(unittest.TestCase):
 
             self.assertEqual(sample_count, 2)
             self.assertEqual(tile_count, 1)
-            self.assertEqual(len(list(result_dir.glob("Pin8_样本*.png"))), 2)
+            self.assertTrue((result_dir / "Pin8.png").is_file())
+            self.assertEqual(len(list(result_dir.glob("Pin8_样本*.png"))), 1)
+
+    def test_initializes_four_directions_and_reuses_disk_cache(self) -> None:
+        try:
+            import cv2  # noqa: F401
+            import numpy as np  # noqa: F401
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            template_dir = Path(directory) / "templates"
+            template_dir.mkdir()
+            for filename in _TEMPLATE_FILES:
+                source = DEFAULT_TEMPLATE_DIR / filename
+                if source.is_file():
+                    shutil.copy2(source, template_dir / filename)
+
+            progress: list[tuple[str, int, int]] = []
+            tile_count, descriptor_count = prepare_ocr_templates(
+                template_dir, progress=lambda *item: progress.append(item)
+            )
+
+            self.assertEqual(tile_count, 34)
+            self.assertGreaterEqual(descriptor_count, 34 * 4)
+            self.assertEqual(len(progress), 34)
+            self.assertEqual(progress[0], ("1m", 1, 34))
+            self.assertTrue((template_dir / ".ocr_features.npz").is_file())
+
+            _TEMPLATE_CACHE.clear()
+            cached_progress: list[tuple[str, int, int]] = []
+            cached_result = prepare_ocr_templates(
+                template_dir, progress=lambda *item: cached_progress.append(item)
+            )
+            self.assertEqual(cached_result, (tile_count, descriptor_count))
+            self.assertEqual(cached_progress, [])
+
+    def test_recognizes_horizontal_tile_from_prepared_direction(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        vertical = self._load_tile(cv2, np, "Pin8.png", 72, 108)
+        horizontal = cv2.rotate(vertical, cv2.ROTATE_90_CLOCKWISE)
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "horizontal.png"
+            success, encoded = cv2.imencode(".png", horizontal)
+            self.assertTrue(success)
+            image_path.write_bytes(encoded.tobytes())
+            result = recognize_hand_image(image_path, expected_count=1)
+
+        self.assertEqual(result.tiles, ["8p"])
 
     def test_auto_detects_eight_concealed_tiles_below_smaller_open_melds(self) -> None:
         try:

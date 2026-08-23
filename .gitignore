@@ -15,6 +15,10 @@ ocr-debug*.png
 local_ocr_samples/
 local_ocr_templates/
 local_settings.json
+**/.ocr_features.npz
+extracted_mahjong_tiles/
+extracted_mahjong_tiles.zip
+extracted_mahjong_tiles_preview.png
 
 .DS_Store
 .idea/
