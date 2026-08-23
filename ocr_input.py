@@ -46,6 +46,8 @@ SUPPORTED_HAND_SIZES = (1, 2, 4, 5, 7, 8, 10, 11, 13, 14)
 AUTO_DETECT_HAND_SIZES = (7, 8, 10, 11, 13, 14)
 MINIMUM_RECOGNITION_CONFIDENCE = 0.62
 MINIMUM_CLASSIFICATION_MARGIN = 0.03
+_MINIMUM_TILE_SURFACE_COVERAGE = 0.20
+_DRAWN_HAND_SIZES = {2, 5, 8, 11, 14}
 
 
 class OCRError(HandValidationError):
@@ -655,6 +657,73 @@ def _layout_regularity(boxes: list[tuple[int, int, int, int]], np: Any) -> float
     return max(0.0, 1.0 - sum(penalties) / len(penalties) * 2.5)
 
 
+def _tile_surface_coverage(
+    image: Any, box: tuple[int, int, int, int]
+) -> float:
+    """估算候选框内真实亮色牌面的占比，排除深色桌布等空白区域。"""
+    x, y, width, height = box
+    image_height, image_width = image.shape[:2]
+    left = max(0, int(x))
+    top = max(0, int(y))
+    right = min(image_width, int(x + width))
+    bottom = min(image_height, int(y + height))
+    if right <= left or bottom <= top:
+        return 0.0
+    crop = image[top:bottom, left:right]
+    brightest = crop.max(axis=2)
+    darkest = crop.min(axis=2)
+    light_neutral = (brightest > 115) & ((brightest - darkest) < 70)
+    return float(light_neutral.mean())
+
+
+def _layout_regular_step(
+    boxes: list[tuple[int, int, int, int]], np: Any
+) -> tuple[float, bool]:
+    lefts = np.array([box[0] for box in boxes], dtype=np.float32)
+    steps = np.diff(lefts)
+    if not len(steps):
+        return float(boxes[0][2]), False
+    drawn_gap = False
+    regular_steps = steps
+    if len(steps) >= 2:
+        previous_median = float(np.median(steps[:-1]))
+        if previous_median * 1.12 <= float(steps[-1]) <= previous_median * 1.65:
+            regular_steps = steps[:-1]
+            drawn_gap = True
+    return float(np.median(regular_steps)), drawn_gap
+
+
+def _has_adjacent_tile_surface(
+    image: Any,
+    boxes: list[tuple[int, int, int, int]],
+    np: Any,
+) -> bool:
+    """判断候选是否只是完整手牌中间截出的一段。"""
+    step, _ = _layout_regular_step(boxes, np)
+    median_y = round(float(np.median([box[1] for box in boxes])))
+    median_width = round(float(np.median([box[2] for box in boxes])))
+    median_height = round(float(np.median([box[3] for box in boxes])))
+    left_neighbor = (
+        round(boxes[0][0] - step),
+        median_y,
+        median_width,
+        median_height,
+    )
+    if _tile_surface_coverage(image, left_neighbor) >= _MINIMUM_TILE_SURFACE_COVERAGE:
+        return True
+
+    right_neighbor = (
+        round(boxes[-1][0] + step),
+        median_y,
+        median_width,
+        median_height,
+    )
+    return (
+        _tile_surface_coverage(image, right_neighbor)
+        >= _MINIMUM_TILE_SURFACE_COVERAGE
+    )
+
+
 def _contour_layouts(
     image: Any, expected_count: int | None, cv2: Any, np: Any
 ) -> list[tuple[list[tuple[int, int, int, int]], float]]:
@@ -700,7 +769,8 @@ def _inferred_grid_layouts(
     detected = _detected_boxes(image, cv2, np)
     counts = (expected_count,) if expected_count else tuple(reversed(AUTO_DETECT_HAND_SIZES))
     layouts: list[tuple[list[tuple[int, int, int, int]], float]] = []
-
+    anchor_groups: list[list[tuple[int, int, int, int]]] = []
+    seen_anchor_groups: set[tuple[tuple[int, int, int, int], ...]] = set()
     for seed in detected:
         anchors = [
             box
@@ -713,7 +783,13 @@ def _inferred_grid_layouts(
         anchors.sort(key=lambda item: item[0])
         if len(anchors) < 3:
             continue
+        signature = tuple(anchors)
+        if signature in seen_anchor_groups:
+            continue
+        seen_anchor_groups.add(signature)
+        anchor_groups.append(anchors)
 
+    for anchors in anchor_groups:
         differences = np.diff([box[0] for box in anchors]).astype(np.float32)
         step_candidates: list[float] = []
         median_width = float(np.median([box[2] for box in anchors]))
@@ -728,40 +804,93 @@ def _inferred_grid_layouts(
             continue
 
         for count in counts:
-            for first_anchor in anchors:
-                predicted: list[tuple[int, int, int, int]] = []
-                used: set[int] = set()
-                for index in range(count):
-                    target_x = first_anchor[0] + index * step
-                    nearest_index = min(
-                        range(len(anchors)),
-                        key=lambda anchor_index: abs(anchors[anchor_index][0] - target_x),
+            gap_factors = (1.0,)
+            if count in _DRAWN_HAND_SIZES:
+                gap_factors = (1.0, 1.18, 1.32, 1.48)
+            candidate_signatures: set[tuple[tuple[int, int, int, int], ...]] = set()
+            for gap_factor in gap_factors:
+                relative_xs = [index * step for index in range(count)]
+                if gap_factor != 1.0:
+                    relative_xs[-1] = (count - 2 + gap_factor) * step
+                origins = {
+                    round(anchor[0] - relative_x)
+                    for anchor in anchors
+                    for relative_x in relative_xs
+                }
+                for origin in origins:
+                    if origin < 0:
+                        continue
+                    last_right = origin + relative_xs[-1] + median_width
+                    if last_right > image.shape[1]:
+                        continue
+                    median_y = round(float(np.median([box[1] for box in anchors])))
+                    median_height = round(
+                        float(np.median([box[3] for box in anchors]))
                     )
-                    nearest = anchors[nearest_index]
-                    if (
-                        nearest_index not in used
-                        and abs(nearest[0] - target_x) <= step * 0.36
+                    endpoint_boxes = (
+                        (origin, median_y, round(median_width), median_height),
+                        (
+                            round(origin + relative_xs[-1]),
+                            median_y,
+                            round(median_width),
+                            median_height,
+                        ),
+                    )
+                    if any(
+                        _tile_surface_coverage(image, box)
+                        < _MINIMUM_TILE_SURFACE_COVERAGE
+                        for box in endpoint_boxes
                     ):
-                        predicted.append(nearest)
-                        used.add(nearest_index)
-                    else:
-                        predicted.append(
-                            (
-                                round(target_x),
-                                round(np.median([box[1] for box in anchors])),
-                                round(median_width),
-                                round(np.median([box[3] for box in anchors])),
-                            )
+                        continue
+                    predicted: list[tuple[int, int, int, int]] = []
+                    used: set[int] = set()
+                    for target_offset in relative_xs:
+                        target_x = origin + target_offset
+                        nearest_index = min(
+                            range(len(anchors)),
+                            key=lambda anchor_index: abs(
+                                anchors[anchor_index][0] - target_x
+                            ),
                         )
+                        nearest = anchors[nearest_index]
+                        if (
+                            nearest_index not in used
+                            and abs(nearest[0] - target_x) <= step * 0.36
+                        ):
+                            predicted.append(nearest)
+                            used.add(nearest_index)
+                        else:
+                            predicted.append(
+                                (
+                                    round(target_x),
+                                    median_y,
+                                    round(median_width),
+                                    median_height,
+                                )
+                            )
 
-                if len(used) < max(3, count // 2):
-                    continue
-                x2 = predicted[-1][0] + predicted[-1][2]
-                if predicted[0][0] < 0 or x2 > image.shape[1]:
-                    continue
-                anchor_coverage = len(used) / count
-                regularity = _layout_regularity(predicted, np)
-                layouts.append((predicted, anchor_coverage * 0.7 + regularity * 0.3))
+                    if len(used) < max(3, count // 2):
+                        continue
+                    signature = tuple(predicted)
+                    if signature in candidate_signatures:
+                        continue
+                    candidate_signatures.add(signature)
+                    surface_scores = [
+                        _tile_surface_coverage(image, box) for box in predicted
+                    ]
+                    if min(surface_scores) < _MINIMUM_TILE_SURFACE_COVERAGE:
+                        continue
+                    anchor_coverage = len(used) / count
+                    regularity = _layout_regularity(predicted, np)
+                    surface_score = sum(surface_scores) / len(surface_scores)
+                    layouts.append(
+                        (
+                            predicted,
+                            anchor_coverage * 0.55
+                            + regularity * 0.20
+                            + surface_score * 0.25,
+                        )
+                    )
 
     # 每种合法张数都保留候选，避免短窗口在这里提前挤掉完整手牌。
     ranked_by_count: dict[
@@ -794,6 +923,9 @@ def _uniform_layout(
 def _shortlist_layouts(
     image: Any,
     layouts: list[tuple[list[tuple[int, int, int, int]], float]],
+    np: Any,
+    *,
+    require_maximal: bool,
 ) -> list[tuple[list[tuple[int, int, int, int]], float]]:
     """每种合法张数只保留几何最可信的一行，避免重复做昂贵模板匹配。"""
     candidates_by_count: dict[
@@ -805,6 +937,8 @@ def _shortlist_layouts(
         if signature in seen:
             continue
         seen.add(signature)
+        if require_maximal and _has_adjacent_tile_surface(image, boxes, np):
+            continue
         bottomness = sum(y + height / 2 for _, y, _, height in boxes) / (
             len(boxes) * image.shape[0]
         )
@@ -928,7 +1062,9 @@ def _recognize_hand_array(
             "并使用 --ocr-count 明确暗牌张数。"
         )
 
-    layouts = _shortlist_layouts(image, layouts)
+    layouts = _shortlist_layouts(
+        image, layouts, np, require_maximal=expected_count is None
+    )
 
     best_result: tuple[float, list[TileRecognition]] | None = None
     for boxes, regularity in layouts:
@@ -948,10 +1084,10 @@ def _recognize_hand_array(
         # 完整张数和几何一致性应优先于单张平均置信度；否则一张较难识别的
         # 摸入牌会让 13 张甚至 7 张的高置信度子窗口胜出。
         layout_score = (
-            average_confidence * 0.62
+            average_confidence * 0.54
             + regularity * 0.16
-            + bottomness * 0.12
-            + count_preference * 0.10
+            + bottomness * 0.10
+            + count_preference * 0.20
         )
         if best_result is None or layout_score > best_result[0]:
             best_result = layout_score, recognitions

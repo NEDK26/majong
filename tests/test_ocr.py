@@ -16,6 +16,7 @@ from ocr_input import (
     build_mahjong_soul_templates,
     import_labeled_template_folder,
     prepare_ocr_templates,
+    recognize_hand_frame,
     recognize_hand_image,
 )
 
@@ -362,6 +363,121 @@ class OCRTests(unittest.TestCase):
             result = recognize_hand_image(image_path)
 
         self.assertEqual(result.tiles, expected)
+
+    def test_auto_recovers_thirteen_tiles_when_only_middle_boxes_are_detected(
+        self,
+    ) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        filenames = [
+            "Man1.png",
+            "Man2.png",
+            "Pin1.png",
+            "Pin2.png",
+            "Pin5.png",
+            "Pin7.png",
+            "Pin8.png",
+            "Sou1.png",
+            "Sou2.png",
+            "Sou3.png",
+            "Sou3.png",
+            "Ton.png",
+            "Ton.png",
+        ]
+        expected = [
+            "1m",
+            "2m",
+            "1p",
+            "2p",
+            "5p",
+            "7p",
+            "8p",
+            "1s",
+            "2s",
+            "3s",
+            "3s",
+            "1z",
+            "1z",
+        ]
+        tile_width, tile_height, step, start = 86, 136, 89, 180
+        canvas = np.full((160, 1600, 3), (25, 45, 70), dtype=np.uint8)
+        boxes = []
+        for index, filename in enumerate(filenames):
+            left = start + index * step
+            tile = self._load_tile(cv2, np, filename, tile_width, tile_height)
+            canvas[12 : 12 + tile_height, left : left + tile_width] = tile
+            boxes.append((left, 12, tile_width, tile_height))
+
+        # 模拟相邻牌框粘连：只有中间连续牌和最右牌形成了独立轮廓。
+        anchors = [boxes[index] for index in (3, 4, 5, 6, 7, 8, 9, 12)]
+        with patch("ocr_input._detected_boxes", return_value=anchors):
+            result = recognize_hand_frame(canvas)
+
+        self.assertEqual(result.tiles, expected)
+        self.assertLessEqual(abs(result.recognitions[0].box[0] - start), 3)
+
+    def test_auto_recovers_fourteen_tiles_with_missing_leading_boxes_and_draw_gap(
+        self,
+    ) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        filenames = [
+            "Man1.png",
+            "Man2.png",
+            "Pin1.png",
+            "Pin2.png",
+            "Pin5.png",
+            "Pin7.png",
+            "Pin8.png",
+            "Sou1.png",
+            "Sou2.png",
+            "Sou3.png",
+            "Sou3.png",
+            "Ton.png",
+            "Ton.png",
+            "Man9.png",
+        ]
+        expected = [
+            "1m",
+            "2m",
+            "1p",
+            "2p",
+            "5p",
+            "7p",
+            "8p",
+            "1s",
+            "2s",
+            "3s",
+            "3s",
+            "1z",
+            "1z",
+            "9m",
+        ]
+        tile_width, tile_height, step, start, drawn_gap = 86, 136, 89, 180, 31
+        canvas = np.full((160, 1700, 3), (25, 45, 70), dtype=np.uint8)
+        boxes = []
+        for index, filename in enumerate(filenames):
+            left = start + index * step
+            if index == len(filenames) - 1:
+                left += drawn_gap
+            tile = self._load_tile(cv2, np, filename, tile_width, tile_height)
+            canvas[12 : 12 + tile_height, left : left + tile_width] = tile
+            boxes.append((left, 12, tile_width, tile_height))
+
+        anchors = [boxes[index] for index in (3, 4, 5, 6, 7, 8, 9, 12, 13)]
+        with patch("ocr_input._detected_boxes", return_value=anchors):
+            result = recognize_hand_frame(canvas)
+
+        self.assertEqual(result.tiles, expected)
+        self.assertLessEqual(abs(result.recognitions[0].box[0] - start), 3)
 
 
 if __name__ == "__main__":
