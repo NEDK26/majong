@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Any
 
 from analyzer import AnalysisResult, calculate_shanten, core_analyze
+from desktop_utils import OCRTemporalConsensus
 from diagnostics import (
     log_event,
     log_exception,
@@ -435,6 +436,7 @@ def analyze_capture(
     expected_count: int | None,
     backend: str = "auto",
     monitor_geometry: dict[str, Any] | None = None,
+    ocr_consensus: OCRTemporalConsensus | None = None,
 ) -> dict[str, Any]:
     """捕获一次框选区域并返回 OCR + 牌理分析结果。"""
     global _LAST_DIAGNOSTIC_AT, _LAST_DIAGNOSTIC_SIGNATURE
@@ -461,6 +463,8 @@ def analyze_capture(
             expected_count=expected_count,
             template_dir=template_dir,
         )
+        if ocr_consensus is not None:
+            ocr_result = ocr_consensus.update(ocr_result)
         ocr_ms = round((time.perf_counter() - ocr_started) * 1000, 1)
         payload = analysis_payload(ocr_result)
         total_ms = round((time.perf_counter() - started) * 1000, 1)

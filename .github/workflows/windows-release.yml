@@ -49,6 +49,7 @@ jobs:
           --noconsole
           --name MahjongStudyAnalyzer
           --add-data "assets\ocr_templates;assets\ocr_templates"
+          --add-data "assets\ocr_models;assets\ocr_models"
           --collect-all mahjong
           --collect-all dxcam
           main.py

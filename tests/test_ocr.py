@@ -9,6 +9,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from ocr_input import (
+    DEFAULT_FAMILY_CLASSIFIER_PATH,
     DEFAULT_TEMPLATE_DIR,
     _TEMPLATE_CACHE,
     _TEMPLATE_FILES,
@@ -22,6 +23,8 @@ from ocr_input import (
 
 
 class OCRTests(unittest.TestCase):
+    FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
     @staticmethod
     def _load_tile(cv2, np, filename: str, width: int, height: int):
         tile = cv2.imread(str(DEFAULT_TEMPLATE_DIR / filename), cv2.IMREAD_UNCHANGED)
@@ -244,6 +247,42 @@ class OCRTests(unittest.TestCase):
             result = recognize_hand_image(image_path, expected_count=1)
 
         self.assertEqual(result.tiles, ["8p"])
+
+    def test_colored_corner_label_is_not_used_as_tile_identity(self) -> None:
+        try:
+            import cv2
+            import numpy as np  # noqa: F401
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        tile = self._load_tile(cv2, np, "Man2.png", 90, 120)
+        cv2.putText(
+            tile,
+            "9",
+            (72, 19),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        result = recognize_hand_frame(tile, expected_count=1)
+
+        self.assertEqual(result.tiles, ["2m"])
+
+    def test_bundled_family_classifier_records_dataset_provenance(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"NumPy is not installed: {exc}")
+
+        with np.load(DEFAULT_FAMILY_CLASSIFIER_PATH, allow_pickle=False) as model:
+            self.assertEqual(
+                str(model["dataset"].item()), "pjura/mahjong_souls_tiles"
+            )
+            self.assertEqual(str(model["dataset_license"].item()), "Apache-2.0")
+            self.assertGreaterEqual(int(model["sample_count"].item()), 34 * 20)
 
     def test_auto_detects_eight_concealed_tiles_below_smaller_open_melds(self) -> None:
         try:
@@ -478,6 +517,69 @@ class OCRTests(unittest.TestCase):
 
         self.assertEqual(result.tiles, expected)
         self.assertLessEqual(abs(result.recognitions[0].box[0] - start), 3)
+
+    def test_replays_real_mahjong_soul_thirteen_tile_row(self) -> None:
+        try:
+            import cv2  # noqa: F401
+            import numpy as np  # noqa: F401
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        result = recognize_hand_image(
+            self.FIXTURE_DIR / "mahjong_soul_13_annotated.jpg"
+        )
+
+        self.assertEqual(
+            result.tiles,
+            [
+                "1m",
+                "2m",
+                "2p",
+                "3p",
+                "5p",
+                "7p",
+                "9p",
+                "1s",
+                "3s",
+                "8s",
+                "8s",
+                "1z",
+                "1z",
+            ],
+        )
+        self.assertTrue(all(item.is_reliable for item in result.recognitions))
+
+    def test_replays_real_mahjong_soul_fourteen_tile_draw_state(self) -> None:
+        try:
+            import cv2  # noqa: F401
+            import numpy as np  # noqa: F401
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"OCR dependencies are not installed: {exc}")
+
+        result = recognize_hand_image(
+            self.FIXTURE_DIR / "mahjong_soul_14_annotated.jpg"
+        )
+
+        self.assertEqual(
+            result.tiles,
+            [
+                "4m",
+                "4m",
+                "5m",
+                "9m",
+                "2p",
+                "3p",
+                "7p",
+                "7p",
+                "7p",
+                "8p",
+                "9p",
+                "4s",
+                "6s",
+                "2m",
+            ],
+        )
+        self.assertTrue(all(item.is_reliable for item in result.recognitions))
 
 
 if __name__ == "__main__":

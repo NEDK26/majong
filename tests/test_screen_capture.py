@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from desktop_utils import (
     AnalysisStabilizer,
+    OCRTemporalConsensus,
     fit_preview_size,
     friendly_error_message,
     shanten_label,
@@ -231,6 +232,50 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertTrue(stabilizer.should_accept((14, "discard")))
         self.assertFalse(stabilizer.should_accept((7, "draw")))
         self.assertTrue(stabilizer.should_accept((7, "draw")))
+
+    def test_temporal_consensus_confirms_repeated_ambiguous_tile(self) -> None:
+        stabilizer = OCRTemporalConsensus()
+
+        def frame(best: str, alternative: str) -> OCRResult:
+            return OCRResult(
+                image_path=None,
+                recognitions=(
+                    TileRecognition(
+                        tile=best,
+                        confidence=0.70,
+                        alternatives=((alternative, 0.797),),
+                        box=(0, 0, 40, 60),
+                        match_score=0.80,
+                    ),
+                ),
+            )
+
+        first = stabilizer.update(frame("4m", "6m"))
+        confirmed = stabilizer.update(frame("4m", "6m"))
+        after_noise = stabilizer.update(frame("6m", "4m"))
+
+        self.assertFalse(first.recognitions[0].is_reliable)
+        self.assertTrue(confirmed.recognitions[0].is_reliable)
+        self.assertEqual(confirmed.tiles, ["4m"])
+        self.assertEqual(after_noise.tiles, ["4m"])
+
+    def test_temporal_consensus_resets_when_hand_count_changes(self) -> None:
+        stabilizer = OCRTemporalConsensus()
+        stable = self._ocr_result()
+        stabilizer.update(stable)
+        stabilizer.update(stable)
+
+        changed = OCRResult(
+            image_path=None,
+            recognitions=stable.recognitions + (
+                TileRecognition("1m", 0.7, (("2m", 0.69),), (320, 0, 40, 60), 0.7),
+            ),
+        )
+
+        result = stabilizer.update(changed)
+
+        self.assertEqual(len(result.recognitions), 9)
+        self.assertEqual(stabilizer.history_size, 1)
 
     def test_low_level_errors_are_translated_to_chinese(self) -> None:
         translated = friendly_error_message(PermissionError("Access denied"))

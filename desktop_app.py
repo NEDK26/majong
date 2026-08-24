@@ -18,7 +18,12 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Callable
 
-from desktop_utils import AnalysisStabilizer, friendly_error_message, shanten_label
+from desktop_utils import (
+    AnalysisStabilizer,
+    OCRTemporalConsensus,
+    friendly_error_message,
+    shanten_label,
+)
 from diagnostics import diagnostics_directory, log_event, log_exception
 from ocr_input import (
     DEFAULT_MAHJONG_SOUL_TEMPLATE_DIR,
@@ -73,6 +78,7 @@ class CompactOverlayApp:
         self.initializing_templates = False
         self.timer_id: str | None = None
         self.analysis_stabilizer = AnalysisStabilizer()
+        self.ocr_consensus = OCRTemporalConsensus()
         self.settings_window: tk.Toplevel | None = None
         self.selector_window: tk.Toplevel | None = None
         self.selector_frame: Any | None = None
@@ -370,6 +376,10 @@ class CompactOverlayApp:
         self.pause_button.configure(text="暂停")
         self._schedule_analysis(80)
 
+    def _reset_recognition_state(self) -> None:
+        self.analysis_stabilizer.reset()
+        self.ocr_consensus.reset()
+
     def _template_initialization_progress(
         self, tile: str, current: int, total: int
     ) -> None:
@@ -460,6 +470,7 @@ class CompactOverlayApp:
                 expected_count,
                 backend=backend,
                 monitor_geometry=monitor_geometry,
+                ocr_consensus=self.ocr_consensus,
             ),
             self._analysis_loaded,
             self._analysis_failed,
@@ -701,7 +712,7 @@ class CompactOverlayApp:
         )
 
     def _settings_changed(self, _: Any = None) -> None:
-        self.analysis_stabilizer.reset()
+        self._reset_recognition_state()
         selected = self.monitor_var.get()
         for monitor in self.monitors:
             if self._monitor_label(monitor) == selected:
@@ -745,7 +756,7 @@ class CompactOverlayApp:
 
     def _calibration_done(self, _: Any) -> None:
         log_event("总览图校准完成")
-        self.analysis_stabilizer.reset()
+        self._reset_recognition_state()
         self.templates_ready = False
         self.status_var.set("校准完成")
         self.main_var.set("牌面模板已保存，可以开始读取游戏画面")
@@ -768,7 +779,7 @@ class CompactOverlayApp:
         )
 
     def _sample_import_done(self, result: tuple[Path, int, int]) -> None:
-        self.analysis_stabilizer.reset()
+        self._reset_recognition_state()
         self.templates_ready = False
         _, sample_count, tile_count = result
         log_event("拆分牌样本导入完成", 样本数量=sample_count, 覆盖牌种=tile_count)
@@ -890,7 +901,7 @@ class CompactOverlayApp:
                 canvas.itemconfigure(self.selector_rect, outline=COLORS["red"])
             return
         self.region = {"x": left, "y": top, "width": width, "height": height}
-        self.analysis_stabilizer.reset()
+        self._reset_recognition_state()
         log_event("手牌区域已框选", 区域=self.region, 显示器=self.monitor_id)
         self._save_preferences()
         self._close_selector(False)

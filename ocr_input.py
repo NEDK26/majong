@@ -3,7 +3,7 @@
 """本地麻将牌图片识别。
 
 该模块只读取用户明确提供的静态图片，不截图、不读取游戏进程、不抓包，
-也不执行鼠标键盘操作。识别方法为 OpenCV 轮廓分割 + 本地模板匹配。
+也不执行鼠标键盘操作。识别流程为牌面投影分槽、家族模板匹配和离线线性分类。
 """
 
 from __future__ import annotations
@@ -20,6 +20,12 @@ from tile_utils import HandValidationError, TILE_NAMES, tile_name_to_chinese
 
 
 DEFAULT_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "ocr_templates"
+DEFAULT_FAMILY_CLASSIFIER_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "ocr_models"
+    / "mahjong_soul_family_classifier.npz"
+)
 
 
 def _mahjong_soul_template_dir() -> Path:
@@ -47,7 +53,11 @@ AUTO_DETECT_HAND_SIZES = (7, 8, 10, 11, 13, 14)
 MINIMUM_RECOGNITION_CONFIDENCE = 0.62
 MINIMUM_CLASSIFICATION_MARGIN = 0.03
 _MINIMUM_TILE_SURFACE_COVERAGE = 0.20
-_DRAWN_HAND_SIZES = {2, 5, 8, 11, 14}
+_WAITING_HAND_SIZES = {1, 4, 7, 10, 13}
+_MODEL_TEMPLATE_DECISIVE_MARGIN = 0.08
+_MODEL_STYLE_ADVANTAGE = 0.02
+_MODEL_OVERRIDE_MARGIN = 0.04
+_MODEL_AGREEMENT_MARGIN = 0.03
 
 
 class OCRError(HandValidationError):
@@ -113,9 +123,11 @@ _TEMPLATE_FILES: dict[str, str] = {
     "Pin5-Dora.png": "5p",
     "Sou5-Dora.png": "5s",
 }
-TemplateDescriptor = tuple[str, Any, Any, float, str]
+TemplateDescriptor = tuple[str, Any, Any, float, str, Any]
 _TEMPLATE_CACHE: dict[str, list[TemplateDescriptor]] = {}
-_DESCRIPTOR_CACHE_VERSION = "four-directions-v2-deduplicated"
+_FAMILY_CLASSIFIER_CACHE: dict[str, dict[str, Any] | None] = {}
+_DESCRIPTOR_CACHE_VERSION = "ink-v3-annotation-filter-family-feature-v1"
+_FAMILY_CLASSIFIER_FEATURE_VERSION = "glyph-pixels-24x32-color-v1"
 _CANONICAL_STEM_BY_TILE = {
     tile: Path(filename).stem
     for filename, tile in _TEMPLATE_FILES.items()
@@ -194,6 +206,16 @@ def _ink_descriptor(image: Any, cv2: Any, np: Any) -> tuple[Any, Any, float]:
     mask[-3:, :] = 0
     mask[:, :3] = 0
     mask[:, -3:] = 0
+    # 训练/诊断素材常在牌角绘制彩色类别或序号。只删除角落里的高饱和色像素，
+    # 不整块挖掉牌角；后者会误伤九万、索子等真实牌面笔画。
+    corner_height = max(6, round(mask.shape[0] * 0.28))
+    corner_width = max(6, round(mask.shape[1] * 0.38))
+    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
+    annotation_color = (hsv[:, :, 1] >= 90) & (hsv[:, :, 2] >= 90)
+    annotation_band = np.zeros_like(mask, dtype=bool)
+    annotation_band[:corner_height, :corner_width] = True
+    annotation_band[:corner_height, -corner_width:] = True
+    mask[annotation_band & annotation_color] = 0
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
 
     components, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
@@ -222,7 +244,6 @@ def _ink_descriptor(image: Any, cv2: Any, np: Any) -> tuple[Any, Any, float]:
     top = (glyph.shape[0] - height) // 2
     glyph[top : top + height, left : left + width] = resized
 
-    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
     pixels = hsv[mask > 0]
     hue, saturation, value = pixels[:, 0], pixels[:, 1], pixels[:, 2]
     colorful = saturation >= 55
@@ -239,6 +260,82 @@ def _ink_descriptor(image: Any, cv2: Any, np: Any) -> tuple[Any, Any, float]:
     color_vector /= max(1.0, float(categories[4].sum()))
     color_vector = np.append(color_vector, foreground_ratio).astype(np.float32)
     return glyph, color_vector, foreground_ratio
+
+
+def _classification_feature(
+    glyph: Any, color_vector: Any, cv2: Any, np: Any, *, normalize: bool = False
+) -> Any:
+    """生成紧凑的牌面分类特征；训练脚本与运行时必须共用这一实现。"""
+    pixels = cv2.resize(glyph, (24, 32), interpolation=cv2.INTER_AREA)
+    feature = np.concatenate(
+        [pixels.astype(np.float32).reshape(-1) / 255.0, color_vector * 3.0]
+    ).astype(np.float32)
+    if normalize:
+        norm = float(np.linalg.norm(feature))
+        if norm > 1e-9:
+            feature /= norm
+    return feature
+
+
+def _family_classifier(path: Path, np: Any) -> dict[str, Any] | None:
+    """加载离线、按花色分层的轻量线性分类器。"""
+    cache_key = str(path.resolve())
+    if cache_key in _FAMILY_CLASSIFIER_CACHE:
+        return _FAMILY_CLASSIFIER_CACHE[cache_key]
+    if not path.is_file():
+        _FAMILY_CLASSIFIER_CACHE[cache_key] = None
+        return None
+
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if str(data["feature_version"].item()) != _FAMILY_CLASSIFIER_FEATURE_VERSION:
+                _FAMILY_CLASSIFIER_CACHE[cache_key] = None
+                return None
+            model: dict[str, Any] = {}
+            for suit in "mpsz":
+                model[suit] = {
+                    "labels": tuple(str(value) for value in data[f"{suit}_labels"]),
+                    "weights": data[f"{suit}_weights"].copy(),
+                    "biases": data[f"{suit}_biases"].copy(),
+                    "positive": data[f"{suit}_positive"].copy(),
+                    "negative": data[f"{suit}_negative"].copy(),
+                    "style_prototypes": data[f"{suit}_style_prototypes"].copy(),
+                }
+    except (OSError, KeyError, ValueError, EOFError):
+        _FAMILY_CLASSIFIER_CACHE[cache_key] = None
+        return None
+    _FAMILY_CLASSIFIER_CACHE[cache_key] = model
+    return model
+
+
+def _family_model_ranking(
+    feature: Any, suit: str, model: dict[str, Any], np: Any
+) -> tuple[list[str], float]:
+    """用一对一线性判别器投票，并返回该画面属于训练风格的相似度。"""
+    family = model[suit]
+    decision_values = feature @ family["weights"].T + family["biases"]
+    votes = np.zeros(len(family["labels"]), dtype=np.int16)
+    strengths = np.zeros(len(family["labels"]), dtype=np.float32)
+    for index, decision in enumerate(decision_values):
+        winner = (
+            int(family["positive"][index])
+            if decision >= 0.0
+            else int(family["negative"][index])
+        )
+        votes[winner] += 1
+        strengths[winner] += min(4.0, abs(float(decision)))
+    order = sorted(
+        range(len(family["labels"])),
+        key=lambda index: (int(votes[index]), float(strengths[index])),
+        reverse=True,
+    )
+
+    normalized = feature.copy()
+    norm = float(np.linalg.norm(normalized))
+    if norm > 1e-9:
+        normalized /= norm
+    style_score = float((family["style_prototypes"] @ normalized).max())
+    return [family["labels"][index] for index in order], style_score
 
 
 def _template_fingerprint(template_dir: Path) -> str:
@@ -262,13 +359,21 @@ def _load_descriptor_cache(
             if str(data["fingerprint"].item()) != fingerprint:
                 return None
             return [
-                (str(tile), glyph, color, float(ratio), str(orientation))
-                for tile, glyph, color, ratio, orientation in zip(
+                (
+                    str(tile),
+                    glyph,
+                    color,
+                    float(ratio),
+                    str(orientation),
+                    model_feature,
+                )
+                for tile, glyph, color, ratio, orientation, model_feature in zip(
                     data["tiles"].tolist(),
                     data["glyphs"],
                     data["colors"],
                     data["ratios"],
                     data["orientations"].tolist(),
+                    data["model_features"],
                     strict=True,
                 )
             ]
@@ -293,6 +398,7 @@ def _save_descriptor_cache(
         colors=np.stack([item[2] for item in descriptors]),
         ratios=np.array([item[3] for item in descriptors], dtype=np.float32),
         orientations=np.array([item[4] for item in descriptors]),
+        model_features=np.stack([item[5] for item in descriptors]),
     )
     try:
         (template_dir / ".ocr_features.npz").write_bytes(buffer.getvalue())
@@ -359,7 +465,12 @@ def _template_descriptors(
                 orientation = (
                     "竖向" if variant.shape[0] >= variant.shape[1] else "横向"
                 )
-                descriptors.append((tile, glyph, colors, ratio, orientation))
+                model_feature = _classification_feature(
+                    glyph, colors, cv2, np, normalize=True
+                )
+                descriptors.append(
+                    (tile, glyph, colors, ratio, orientation, model_feature)
+                )
 
         if "-Dora" not in filename and tile not in prepared_tiles:
             prepared_tiles.add(tile)
@@ -676,231 +787,202 @@ def _tile_surface_coverage(
     return float(light_neutral.mean())
 
 
-def _layout_regular_step(
-    boxes: list[tuple[int, int, int, int]], np: Any
-) -> tuple[float, bool]:
-    lefts = np.array([box[0] for box in boxes], dtype=np.float32)
-    steps = np.diff(lefts)
-    if not len(steps):
-        return float(boxes[0][2]), False
-    drawn_gap = False
-    regular_steps = steps
-    if len(steps) >= 2:
-        previous_median = float(np.median(steps[:-1]))
-        if previous_median * 1.12 <= float(steps[-1]) <= previous_median * 1.65:
-            regular_steps = steps[:-1]
-            drawn_gap = True
-    return float(np.median(regular_steps)), drawn_gap
-
-
-def _has_adjacent_tile_surface(
-    image: Any,
-    boxes: list[tuple[int, int, int, int]],
-    np: Any,
-) -> bool:
-    """判断候选是否只是完整手牌中间截出的一段。"""
-    step, _ = _layout_regular_step(boxes, np)
-    median_y = round(float(np.median([box[1] for box in boxes])))
-    median_width = round(float(np.median([box[2] for box in boxes])))
-    median_height = round(float(np.median([box[3] for box in boxes])))
-    left_neighbor = (
-        round(boxes[0][0] - step),
-        median_y,
-        median_width,
-        median_height,
-    )
-    if _tile_surface_coverage(image, left_neighbor) >= _MINIMUM_TILE_SURFACE_COVERAGE:
-        return True
-
-    right_neighbor = (
-        round(boxes[-1][0] + step),
-        median_y,
-        median_width,
-        median_height,
-    )
+def _neutral_tile_mask(image: Any, cv2: Any, np: Any) -> Any:
+    """提取牌面本身，不把牌框轮廓是否粘连当作分牌依据。"""
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    light, channel_a, channel_b = cv2.split(lab)
     return (
-        _tile_surface_coverage(image, right_neighbor)
-        >= _MINIMUM_TILE_SURFACE_COVERAGE
+        (light > 145)
+        & (np.abs(channel_a.astype(np.int16) - 128) < 22)
+        & (np.abs(channel_b.astype(np.int16) - 128) < 28)
     )
 
 
-def _contour_layouts(
-    image: Any, expected_count: int | None, cv2: Any, np: Any
-) -> list[tuple[list[tuple[int, int, int, int]], float]]:
-    boxes = _detected_boxes(image, cv2, np)
-    layouts: list[tuple[list[tuple[int, int, int, int]], float]] = []
-    counts = (expected_count,) if expected_count else AUTO_DETECT_HAND_SIZES
+def _projection_tile_boxes(
+    image: Any, cv2: Any, np: Any
+) -> list[tuple[int, int, int, int]]:
+    """按白色牌面的水平投影直接切出每张牌。
 
-    for count in counts:
-        for seed in boxes:
-            seed_center = seed[1] + seed[3] / 2
-            row = [
-                box
-                for box in boxes
-                if 0.60 <= box[3] / seed[3] <= 1.55
-                and abs((box[1] + box[3] / 2) - seed_center) <= max(box[3], seed[3]) * 0.38
-            ]
-            row.sort(key=lambda item: item[0])
-            if len(row) < count:
-                continue
-            for start in range(len(row) - count + 1):
-                window = row[start : start + count]
-                regularity = _layout_regularity(window, np)
-                if regularity >= 0.30:
-                    layouts.append((window, regularity))
-
-    # 去掉完全相同或高度重叠的重复布局。
-    unique: list[tuple[list[tuple[int, int, int, int]], float]] = []
-    signatures: set[tuple[tuple[int, int, int, int], ...]] = set()
-    for boxes_in_layout, score in sorted(layouts, key=lambda item: item[1], reverse=True):
-        signature = tuple(boxes_in_layout)
-        if signature not in signatures:
-            signatures.add(signature)
-            unique.append((boxes_in_layout, score))
-    # 后续会按张数分别做 shortlist；这里不能全局截断，否则大量高规整度的
-    # 7 张子窗口会把真实的 13/14 张完整手牌候选挤掉。
-    return unique
-
-
-def _inferred_grid_layouts(
-    image: Any, expected_count: int | None, cv2: Any, np: Any
-) -> list[tuple[list[tuple[int, int, int, int]], float]]:
-    """根据同一行的部分完整外框补齐漏检牌，适合雀魂底部暗牌。"""
-    detected = _detected_boxes(image, cv2, np)
-    counts = (expected_count,) if expected_count else tuple(reversed(AUTO_DETECT_HAND_SIZES))
-    layouts: list[tuple[list[tuple[int, int, int, int]], float]] = []
-    anchor_groups: list[list[tuple[int, int, int, int]]] = []
-    seen_anchor_groups: set[tuple[tuple[int, int, int, int], ...]] = set()
-    for seed in detected:
-        anchors = [
-            box
-            for box in detected
-            if 0.78 <= box[2] / seed[2] <= 1.25
-            and 0.78 <= box[3] / seed[3] <= 1.25
-            and abs((box[1] + box[3] / 2) - (seed[1] + seed[3] / 2))
-            <= seed[3] * 0.30
+    雀魂相邻牌的外框经常在二值化后粘成一个大轮廓，但两张牌之间仍有稳定的
+    深色竖缝。水平投影保留这条缝，因此它才是牌数判断的主信号；轮廓只用于
+    参考图校准，不再参与实战手牌张数竞争。
+    """
+    height, width = image.shape[:2]
+    mask = _neutral_tile_mask(image, cv2, np)
+    contour_boxes = _detected_boxes(image, cv2, np)
+    vertical_contours = [
+        box
+        for box in contour_boxes
+        if 0.45 <= box[2] / max(1, box[3]) <= 0.95
+    ]
+    if not vertical_contours:
+        row_top, row_bottom = 0, height
+        reference_width = max(12.0, height * 0.55)
+    else:
+        tallest = max(box[3] for box in vertical_contours)
+        row_contours = [
+            box for box in vertical_contours if box[3] >= tallest * 0.76
         ]
-        anchors.sort(key=lambda item: item[0])
-        if len(anchors) < 3:
-            continue
-        signature = tuple(anchors)
-        if signature in seen_anchor_groups:
-            continue
-        seen_anchor_groups.add(signature)
-        anchor_groups.append(anchors)
+        row_top = min(box[1] for box in row_contours)
+        row_bottom = max(box[1] + box[3] for box in row_contours)
+        reference_width = float(np.median([box[2] for box in row_contours]))
 
-    for anchors in anchor_groups:
-        differences = np.diff([box[0] for box in anchors]).astype(np.float32)
-        step_candidates: list[float] = []
-        median_width = float(np.median([box[2] for box in anchors]))
-        for difference in differences:
-            multiples = max(1, round(float(difference) / max(1.0, median_width)))
-            if multiples <= 3:
-                step_candidates.append(float(difference) / multiples)
-        if not step_candidates:
+    row_mask = mask[row_top:row_bottom]
+    minimum_column_pixels = max(4, round((row_bottom - row_top) * 0.10))
+    active_columns = row_mask.sum(axis=0) >= minimum_column_pixels
+    minimum_run_width = max(6, round(reference_width * 0.16))
+
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, active in enumerate(active_columns.tolist() + [False]):
+        if active and start is None:
+            start = index
+        elif not active and start is not None:
+            if index - start >= minimum_run_width:
+                runs.append((start, index))
+            start = None
+
+    boxes: list[tuple[int, int, int, int]] = []
+    for left, right in runs:
+        column_mask = row_mask[:, left:right]
+        minimum_row_pixels = max(3, round((right - left) * 0.10))
+        active_rows = np.where(column_mask.sum(axis=1) >= minimum_row_pixels)[0]
+        if not len(active_rows):
             continue
-        step = float(np.median(step_candidates))
-        if not median_width * 0.82 <= step <= median_width * 1.45:
+        top = row_top + int(active_rows.min())
+        bottom = row_top + int(active_rows.max()) + 1
+        box_width = right - left
+        box_height = bottom - top
+        aspect = box_width / max(1, box_height)
+        if box_height < max(24, height * 0.05) or not 0.32 <= aspect <= 2.30:
             continue
+        # 白色投影从牌面内侧开始；向外补一像素可保留完整边缘且不会吃到邻牌。
+        expanded_left = max(0, left - 1)
+        expanded_right = min(width, right + 1)
+        projected = (expanded_left, top, expanded_right - expanded_left, box_height)
+        matching_contour = next(
+            (
+                contour
+                for contour in vertical_contours
+                if abs(contour[0] - projected[0]) <= max(3, reference_width * 0.08)
+                and 0.72 <= contour[2] / max(1, projected[2]) <= 1.28
+            ),
+            None,
+        )
+        boxes.append(matching_contour or projected)
+    return boxes
 
-        for count in counts:
-            gap_factors = (1.0,)
-            if count in _DRAWN_HAND_SIZES:
-                gap_factors = (1.0, 1.18, 1.32, 1.48)
-            candidate_signatures: set[tuple[tuple[int, int, int, int], ...]] = set()
-            for gap_factor in gap_factors:
-                relative_xs = [index * step for index in range(count)]
-                if gap_factor != 1.0:
-                    relative_xs[-1] = (count - 2 + gap_factor) * step
-                origins = {
-                    round(anchor[0] - relative_x)
-                    for anchor in anchors
-                    for relative_x in relative_xs
-                }
-                for origin in origins:
-                    if origin < 0:
-                        continue
-                    last_right = origin + relative_xs[-1] + median_width
-                    if last_right > image.shape[1]:
-                        continue
-                    median_y = round(float(np.median([box[1] for box in anchors])))
-                    median_height = round(
-                        float(np.median([box[3] for box in anchors]))
-                    )
-                    endpoint_boxes = (
-                        (origin, median_y, round(median_width), median_height),
-                        (
-                            round(origin + relative_xs[-1]),
-                            median_y,
-                            round(median_width),
-                            median_height,
-                        ),
-                    )
-                    if any(
-                        _tile_surface_coverage(image, box)
-                        < _MINIMUM_TILE_SURFACE_COVERAGE
-                        for box in endpoint_boxes
-                    ):
-                        continue
-                    predicted: list[tuple[int, int, int, int]] = []
-                    used: set[int] = set()
-                    for target_offset in relative_xs:
-                        target_x = origin + target_offset
-                        nearest_index = min(
-                            range(len(anchors)),
-                            key=lambda anchor_index: abs(
-                                anchors[anchor_index][0] - target_x
-                            ),
-                        )
-                        nearest = anchors[nearest_index]
-                        if (
-                            nearest_index not in used
-                            and abs(nearest[0] - target_x) <= step * 0.36
-                        ):
-                            predicted.append(nearest)
-                            used.add(nearest_index)
-                        else:
-                            predicted.append(
-                                (
-                                    round(target_x),
-                                    median_y,
-                                    round(median_width),
-                                    median_height,
-                                )
-                            )
 
-                    if len(used) < max(3, count // 2):
-                        continue
-                    signature = tuple(predicted)
-                    if signature in candidate_signatures:
-                        continue
-                    candidate_signatures.add(signature)
-                    surface_scores = [
-                        _tile_surface_coverage(image, box) for box in predicted
-                    ]
-                    if min(surface_scores) < _MINIMUM_TILE_SURFACE_COVERAGE:
-                        continue
-                    anchor_coverage = len(used) / count
-                    regularity = _layout_regularity(predicted, np)
-                    surface_score = sum(surface_scores) / len(surface_scores)
-                    layouts.append(
-                        (
-                            predicted,
-                            anchor_coverage * 0.55
-                            + regularity * 0.20
-                            + surface_score * 0.25,
-                        )
-                    )
+def _concealed_hand_layout(
+    image: Any,
+    expected_count: int | None,
+    cv2: Any,
+    np: Any,
+) -> list[tuple[int, int, int, int]] | None:
+    """按麻将桌面语义确定暗牌：左起连续牌列，加可选的末尾摸入牌。
 
-    # 每种合法张数都保留候选，避免短窗口在这里提前挤掉完整手牌。
-    ranked_by_count: dict[
-        int, list[tuple[list[tuple[int, int, int, int]], float]]
-    ] = {}
-    for candidate in sorted(layouts, key=lambda item: item[1], reverse=True):
-        bucket = ranked_by_count.setdefault(len(candidate[0]), [])
-        if len(bucket) < 4:
-            bucket.append(candidate)
-    return [candidate for bucket in ranked_by_count.values() for candidate in bucket]
+    这里不枚举 7/8/10/11/13/14 后再按识别分数竞猜。暗牌必须从最左一张
+    开始；普通相邻间距组成基础手牌，只有在 3n+1 张之后允许一次较大的间隔，
+    间隔后的单张就是摸入牌并立即结束暗牌区域。右侧更小、横置或更远的牌属于
+    副露，不会进入候选舍牌。
+    """
+    projected = _projection_tile_boxes(image, cv2, np)
+    if not projected:
+        return None
+
+    # 暗牌是画面里尺寸最大的同一行直立牌；右侧副露通常更小或横置。
+    vertical = [box for box in projected if box[2] / max(1, box[3]) <= 0.95]
+    if not vertical:
+        return None
+    tallest = max(box[3] for box in vertical)
+    size_candidates = [box for box in vertical if box[3] >= tallest * 0.78]
+    widths = np.array([box[2] for box in size_candidates], dtype=np.float32)
+    # 索子图案会把白色牌面投影切成多个窄片；用较宽分位估计真实牌宽，
+    # 再以完整牌面作为网格锚点，窄片只作为槽位存在性的证据。
+    width_floor = float(np.percentile(widths, 65))
+    anchors = [box for box in size_candidates if box[2] >= width_floor * 0.82]
+    anchors.sort(key=lambda item: item[0])
+    if not anchors:
+        return None
+
+    median_width = float(np.median([box[2] for box in anchors]))
+    median_height = float(np.median([box[3] for box in anchors]))
+    median_y = float(np.median([box[1] for box in anchors]))
+
+    step_candidates: list[float] = []
+    for difference in np.diff([box[0] for box in anchors]).astype(np.float32):
+        multiples = max(1, round(float(difference) / max(1.0, median_width)))
+        if multiples <= 8:
+            candidate = float(difference) / multiples
+            if median_width * 0.88 <= candidate <= median_width * 1.35:
+                step_candidates.append(candidate)
+    if not step_candidates:
+        return None
+    regular_step = float(np.median(step_candidates))
+
+    origin = float(anchors[0][0])
+    template_box = (
+        round(origin),
+        round(median_y),
+        round(median_width),
+        round(median_height),
+    )
+    while origin - regular_step >= 0:
+        previous = (
+            round(origin - regular_step),
+            template_box[1],
+            template_box[2],
+            template_box[3],
+        )
+        if _tile_surface_coverage(image, previous) < _MINIMUM_TILE_SURFACE_COVERAGE:
+            break
+        origin -= regular_step
+
+    selected: list[tuple[int, int, int, int]] = []
+    used_anchors: set[int] = set()
+    for index in range(14):
+        target_x = origin + index * regular_step
+        nearest_index = min(
+            range(len(anchors)),
+            key=lambda anchor_index: abs(anchors[anchor_index][0] - target_x),
+        )
+        nearest = anchors[nearest_index]
+        distance = abs(nearest[0] - target_x)
+        maximum_distance = regular_step * 0.24
+        # 3n+1 张之后允许末张以摸牌间隔出现；其余槽位必须落在普通网格上。
+        if len(selected) in _WAITING_HAND_SIZES:
+            maximum_distance = regular_step * 0.38
+
+        if nearest_index not in used_anchors and distance <= maximum_distance:
+            box = nearest
+            used_anchors.add(nearest_index)
+        else:
+            box = (
+                round(target_x),
+                round(median_y),
+                round(median_width),
+                round(median_height),
+            )
+            if _tile_surface_coverage(image, box) < _MINIMUM_TILE_SURFACE_COVERAGE:
+                break
+
+        if selected:
+            actual_step = box[0] - selected[-1][0]
+            if actual_step > regular_step * 1.18:
+                if len(selected) not in _WAITING_HAND_SIZES:
+                    break
+                selected.append(box)
+                break
+        selected.append(box)
+
+    if expected_count is not None:
+        if len(selected) >= expected_count:
+            return selected[:expected_count]
+        return None
+
+    if len(selected) not in AUTO_DETECT_HAND_SIZES:
+        return None
+    return selected
 
 
 def _uniform_layout(
@@ -918,51 +1000,6 @@ def _uniform_layout(
         right = round((index + 1) * cell_width - cell_width * 0.06)
         boxes.append((left, 0, max(1, right - left), height))
     return boxes, 0.45
-
-
-def _shortlist_layouts(
-    image: Any,
-    layouts: list[tuple[list[tuple[int, int, int, int]], float]],
-    np: Any,
-    *,
-    require_maximal: bool,
-) -> list[tuple[list[tuple[int, int, int, int]], float]]:
-    """每种合法张数只保留几何最可信的一行，避免重复做昂贵模板匹配。"""
-    candidates_by_count: dict[
-        int, list[tuple[float, list[tuple[int, int, int, int]], float]]
-    ] = {}
-    seen: set[tuple[tuple[int, int, int, int], ...]] = set()
-    for boxes, regularity in layouts:
-        signature = tuple(boxes)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        if require_maximal and _has_adjacent_tile_surface(image, boxes, np):
-            continue
-        bottomness = sum(y + height / 2 for _, y, _, height in boxes) / (
-            len(boxes) * image.shape[0]
-        )
-        count_preference = min(1.0, len(boxes) / 14.0)
-        geometry_score = (
-            regularity * 0.55 + bottomness * 0.30 + count_preference * 0.15
-        )
-        candidates_by_count.setdefault(len(boxes), []).append(
-            (geometry_score, boxes, regularity)
-        )
-
-    ranked_by_count = {
-        count: sorted(candidates, key=lambda item: item[0], reverse=True)[:2]
-        for count, candidates in candidates_by_count.items()
-    }
-    # 至少让每种张数的最优候选进入昂贵的分类阶段，再用额外名额补充次优候选。
-    finalists = [candidates[0] for candidates in ranked_by_count.values()]
-    extras = sorted(
-        (candidate for candidates in ranked_by_count.values() for candidate in candidates[1:]),
-        key=lambda item: item[0],
-        reverse=True,
-    )
-    finalists.extend(extras[: max(0, 12 - len(finalists))])
-    return [(boxes, regularity) for _, boxes, regularity in finalists]
 
 
 def _similarity(
@@ -1004,7 +1041,7 @@ def _classify_tile(
     query_glyph, query_colors, query_ratio = _ink_descriptor(crop, cv2, np)
     query_orientation = "竖向" if crop.shape[0] >= crop.shape[1] else "横向"
     best_by_tile: dict[str, float] = {}
-    for tile, glyph, colors, ratio, orientation in templates:
+    for tile, glyph, colors, ratio, orientation, _ in templates:
         if orientation != query_orientation:
             continue
         score = _similarity(
@@ -1021,14 +1058,60 @@ def _classify_tile(
 
     ranking = sorted(best_by_tile.items(), key=lambda item: item[1], reverse=True)
     best_tile, best_score = ranking[0]
-    second_score = ranking[1][1]
+    selected_ranking = ranking
+
+    # 先由全局模板确定万/筒/索/字牌家族，再只在同一家族内辨别数字或字牌。
+    # 这避免所有万子共有的“萬”吞掉上方数字特征，也不会让 5p/5s 跨花色乱跳。
+    # 只有当前模板在同家族内含糊、且画面与训练风格更接近时，模型才覆盖模板。
+    classifier = _family_classifier(DEFAULT_FAMILY_CLASSIFIER_PATH, np)
+    if classifier is not None:
+        suit = best_tile[-1]
+        family_ranking = [item for item in ranking if item[0].endswith(suit)]
+        if len(family_ranking) >= 2:
+            family_margin = family_ranking[0][1] - family_ranking[1][1]
+            query_feature = _classification_feature(
+                query_glyph, query_colors, cv2, np
+            )
+            model_ranking, model_style_score = _family_model_ranking(
+                query_feature, suit, classifier, np
+            )
+            model_tile = model_ranking[0]
+            if family_margin < _MODEL_TEMPLATE_DECISIVE_MARGIN:
+                if model_tile == best_tile:
+                    boosted_score = min(
+                        1.0, best_score + _MODEL_AGREEMENT_MARGIN
+                    )
+                    selected_ranking = [(best_tile, boosted_score), *ranking[1:]]
+                else:
+                    normalized_query = query_feature / max(
+                        1e-9, float(np.linalg.norm(query_feature))
+                    )
+                    active_style_score = max(
+                        float(template_feature @ normalized_query)
+                        for tile, _, _, _, orientation, template_feature in templates
+                        if tile.endswith(suit) and orientation == query_orientation
+                    )
+                    if (
+                        model_style_score
+                        >= active_style_score + _MODEL_STYLE_ADVANTAGE
+                    ):
+                        boosted_score = min(
+                            1.0, best_score + _MODEL_OVERRIDE_MARGIN
+                        )
+                        selected_ranking = [
+                            (model_tile, boosted_score),
+                            *[item for item in ranking if item[0] != model_tile],
+                        ]
+                best_tile, best_score = selected_ranking[0]
+
+    second_score = selected_ranking[1][1]
     # 既考虑绝对匹配分，也考虑第一名与第二名的区分度。
     margin = max(0.0, best_score - second_score)
     confidence = min(1.0, best_score * 0.86 + min(0.14, margin * 1.8))
     return TileRecognition(
         tile=best_tile,
         confidence=confidence,
-        alternatives=tuple(ranking[1:9]),
+        alternatives=tuple(selected_ranking[1:9]),
         box=box,
         match_score=best_score,
     )
@@ -1048,52 +1131,25 @@ def _recognize_hand_array(
     image = _composite_alpha(image, cv2, np)
     templates = _template_descriptors(Path(template_dir).expanduser().resolve(), cv2, np)
 
-    layouts = _contour_layouts(image, expected_count, cv2, np)
-    layouts.extend(_inferred_grid_layouts(image, expected_count, cv2, np))
-    # 等分整图只适用于用户已明确张数且图片已经紧密裁成一行的情况。
-    if expected_count is not None:
+    boxes = _concealed_hand_layout(image, expected_count, cv2, np)
+    # 横置单牌或已经紧密裁切、没有可用白色投影的静态图片，仅在用户明确
+    # 指定张数时使用整图等分；实时自动模式绝不靠等分猜张数。
+    if boxes is None and expected_count is not None:
         fallback = _uniform_layout(image, expected_count)
-        if fallback:
-            layouts.append(fallback)
+        boxes = fallback[0] if fallback else None
 
-    if not layouts:
+    if not boxes:
         raise OCRError(
             "未检测到合法张数的一行直立牌。请先把图片裁到只包含自己的横向暗牌，"
             "并使用 --ocr-count 明确暗牌张数。"
         )
 
-    layouts = _shortlist_layouts(
-        image, layouts, np, require_maximal=expected_count is None
-    )
-
-    best_result: tuple[float, list[TileRecognition]] | None = None
-    for boxes, regularity in layouts:
-        recognitions: list[TileRecognition] = []
-        for box in boxes:
-            x, y, width, height = box
-            crop = image[y : y + height, x : x + width]
-            recognitions.append(_classify_tile(crop, box, templates, cv2, np))
-
-        average_confidence = sum(item.confidence for item in recognitions) / len(
-            recognitions
-        )
-        bottomness = sum(y + height / 2 for _, y, _, height in boxes) / (
-            len(boxes) * image.shape[0]
-        )
-        count_preference = min(1.0, len(boxes) / 14.0)
-        # 完整张数和几何一致性应优先于单张平均置信度；否则一张较难识别的
-        # 摸入牌会让 13 张甚至 7 张的高置信度子窗口胜出。
-        layout_score = (
-            average_confidence * 0.54
-            + regularity * 0.16
-            + bottomness * 0.10
-            + count_preference * 0.20
-        )
-        if best_result is None or layout_score > best_result[0]:
-            best_result = layout_score, recognitions
-
-    assert best_result is not None
-    return OCRResult(image_path=image_path, recognitions=tuple(best_result[1]))
+    recognitions: list[TileRecognition] = []
+    for box in boxes:
+        x, y, width, height = box
+        crop = image[y : y + height, x : x + width]
+        recognitions.append(_classify_tile(crop, box, templates, cv2, np))
+    return OCRResult(image_path=image_path, recognitions=tuple(recognitions))
 
 
 def recognize_hand_frame(
